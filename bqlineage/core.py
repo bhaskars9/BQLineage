@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from sqlglot.dialects.dialect import Dialect
 from sqlglot.errors import ParseError, SqlglotError
 from sqlglot.lineage import lineage as _sg_lineage
 from sqlglot.lineage import to_node as _to_node
+from sqlglot.optimizer import qualify_columns as _qc
 from sqlglot.optimizer.annotate_types import annotate_types
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, ScopeType, build_scope, find_all_in_scope
@@ -35,6 +37,29 @@ class _Tokenizer(_BQ.tokenizer_class):
         **_BQ.tokenizer_class.KEYWORDS,
         **dict.fromkeys(("BEGIN", "ELSEIF", "EXCEPTION", "LOOP", "REPEAT", "WHILE"), TokenType.VAR),
     }
+
+
+class _Resolver(_qc.Resolver):
+    # 1. BigQuery lets a CTE repeat a column name - e.g. SELECT * (or c1.*, c2.*) over a USING join whose sides
+    #    share non-key columns like load_ts. sqlglot then refuses to expand any SELECT * over that CTE, which cuts
+    #    lineage for every column after it. Listing each name once lets the star expand; only the repeated name
+    #    itself (which BigQuery won't let you reference anyway) maps to its first occurrence.
+    # 2. A source whose columns are unknown (an unexpanded *) is reported as having no known columns. sqlglot
+    #    treats the two alike everywhere except USING expansion, which raised "Cannot automatically join" when
+    #    the right side was SELECT * over a table without a schema.
+    def get_source_columns(self, name, only_visible=False):
+        columns = super().get_source_columns(name, only_visible)
+        return [] if "*" in columns else list(dict.fromkeys(columns))
+
+
+@contextmanager
+def _star_friendly_resolver():
+    """Use _Resolver for our own qualify() calls only; other sqlglot users in the process are unaffected."""
+    original, _qc.Resolver = _qc.Resolver, _Resolver
+    try:
+        yield
+    finally:
+        _qc.Resolver = original
 
 
 @dataclass
@@ -104,9 +129,11 @@ class LineageResult:
         sources          - columns its values come from
         indirect_sources - columns the JOIN / WHERE / GROUP BY / HAVING / QUALIFY along the way read
         steps            - how it was built: the expression and conditions at each step, from the target back
-                           through CTEs, subqueries, temp tables and views"""
+                           through CTEs, subqueries, temp tables and views
+        unresolved       - only when lineage got stuck: the references whose source couldn't be found"""
         direct: dict[str, set[str]] = {}
         indirect: dict[str, set[str]] = {}
+        unresolved: dict[str, set[str]] = {}
         steps: dict[str, list[dict]] = {}
         for s in self.statements + self.views:
             for c, srcs in s.columns.items():
@@ -114,6 +141,7 @@ class LineageResult:
                 direct.setdefault(k, set()).update(srcs)
                 info = s.details.get(c, {})
                 indirect.setdefault(k, set()).update(info.get("indirect", ()))
+                unresolved.setdefault(k, set()).update(info.get("unresolved", ()))
                 own = steps.setdefault(k, [])
                 for st in info.get("steps", ()):
                     rest = {x: y for x, y in st.items() if x != "label"}
@@ -129,26 +157,27 @@ class LineageResult:
 
         memo: dict[str, tuple] = {}
 
-        def trace(key):  # (direct, indirect, steps), expanded through temp tables / views
+        def trace(key):  # (direct, indirect, steps, unresolved), expanded through temp tables / views
             if key in memo:
                 return memo[key]
-            memo[key] = (set(), set(), [])  # in progress: a self-referencing temp table adds nothing
-            d_out, i_out, s_out = set(), set(), list(steps.get(key, []))
+            memo[key] = (set(), set(), [], set())  # in progress: a self-referencing temp table adds nothing
+            d_out, i_out, s_out, u_out = set(), set(), list(steps.get(key, [])), set(unresolved.get(key, ()))
             for src in direct.get(key, ()):
                 if traced(src):
-                    d, i, s = trace(src)
+                    d, i, s, u = trace(src)
                     d_out |= d
                     i_out |= i  # the conditions that built a temp column apply to what reads it
                     s_out += [x for x in s if x not in s_out]
+                    u_out |= u
                 else:
                     d_out.add(src)
             for src in indirect.get(key, ()):
                 if traced(src):
-                    d, i, _ = trace(src)
+                    d, i, _, _ = trace(src)
                     i_out |= d | i
                 else:
                     i_out.add(src)
-            memo[key] = (d_out, i_out, s_out)
+            memo[key] = (d_out, i_out, s_out, u_out)
             return memo[key]
 
         wanted = {c.lower() for c in columns} if columns else None
@@ -158,8 +187,10 @@ class LineageResult:
                 continue
             for c in s.columns:
                 if wanted is None or c.lower() in wanted:
-                    d, i, st = trace(f"{s.target}.{c}")
+                    d, i, st, u = trace(f"{s.target}.{c}")
                     out[f"{s.target}.{c}"] = {"sources": sorted(d), "indirect_sources": sorted(i), "steps": st}
+                    if u:
+                        out[f"{s.target}.{c}"]["unresolved"] = sorted(u)
         return dict(sorted(out.items()))
 
     def _collect(self, graph, targets, resolve, table_of):
@@ -418,8 +449,9 @@ class _Analyzer:
         details: dict[str, dict] = {}
         for n, srcs, _, info in pairs:  # a MERGE can write one column from several WHEN branches
             columns.setdefault(n, set()).update(srcs)
-            d = details.setdefault(n, {"steps": [], "indirect": set()})
+            d = details.setdefault(n, {"steps": [], "indirect": set(), "unresolved": set()})
             d["indirect"] |= info["indirect"]
+            d["unresolved"] |= info.get("unresolved", set())
             d["steps"] += [st for st in info["steps"] if st not in d["steps"]]
         sink = self.statements if sink is None else sink
         sink.append(StatementLineage(idx, kind, name, sources, columns, details))
@@ -580,34 +612,43 @@ class _Analyzer:
         return [(tc, *rest) for tc, (_, *rest) in zip(target_cols, pairs)]
 
     def _qualify(self, query, mapping):
-        """qualify(); names it can't resolve that are script variables (DECLARE / FOR) become values.
-        That is BigQuery's own order: a name is a column if any source has it, else a variable."""
+        """(qualified query or None, first error or None).
+        Names qualify() can't resolve that are script variables (DECLARE / FOR) become values - BigQuery's own
+        order: a name is a column if any source has it, else a variable. Any other unresolvable name is returned
+        as the error, with the query qualified again without validation so the other columns keep their lineage."""
         base = query.copy()
-        while True:
-            try:
-                # quote_identifiers=False keeps the expressions shown in `steps` readable
-                return qualify(base.copy(), schema=mapping, dialect=D, validate_qualify_columns=True,
-                               quote_identifiers=False)
-            except SqlglotError as e:
-                m = _UNRESOLVED.search(str(e))
-                name, table = (m[1].lower(), (m[2] or "").lower()) if m else ("", "")
-                hits = [c for c in base.find_all(exp.Column)
-                        if (table and table in self.variables and c.table.lower() == table)
-                        or (not table and name in self.variables and not c.table and c.name.lower() == name)]
-                if not hits:
-                    raise
-                for c in hits:
-                    c.replace(exp.Parameter(this=exp.Var(this=c.sql(D))))
+        # quote_identifiers=False keeps the expressions shown in `steps` readable
+        opts = dict(schema=mapping, dialect=D, quote_identifiers=False)
+        with _star_friendly_resolver():
+            while True:
+                try:
+                    return qualify(base.copy(), validate_qualify_columns=True, **opts), None
+                except SqlglotError as e:
+                    m = _UNRESOLVED.search(str(e))
+                    name, table = (m[1].lower(), (m[2] or "").lower()) if m else ("", "")
+                    hits = [c for c in base.find_all(exp.Column)
+                            if (table and table in self.variables and c.table.lower() == table)
+                            or (not table and name in self.variables and not c.table and c.name.lower() == name)]
+                    if hits:
+                        for c in hits:
+                            c.replace(exp.Parameter(this=exp.Var(this=c.sql(D))))
+                        continue
+                    try:
+                        return qualify(base.copy(), validate_qualify_columns=False, **opts), e
+                    except SqlglotError:
+                        return None, e
 
     def _query_lineage(self, query, idx) -> list[tuple[str, set[str], str, dict]]:
-        """Per output column: (name, source columns, type, {"steps": [...], "indirect": {...}})."""
+        """Per output column: (name, source columns, type, {"steps", "indirect", "unresolved"})."""
+        if isinstance(query, exp.Subquery):  # CREATE ... AS ( WITH ... SELECT ... ): sqlglot loses the CTEs
+            query = query.unnest()  # behind a parenthesized root, so lineage stopped at every CTE column
         mapping = MappingSchema(self.schema, dialect=D)
-        try:
-            q = self._qualify(query, mapping)
-        except SqlglotError as e:
-            pos = _POSITION.search(str(e))
-            severity, msg = self._explain(_POSITION.sub("", str(e)), query)
+        q, err = self._qualify(query, mapping)
+        if err is not None:
+            pos = _POSITION.search(str(err))
+            severity, msg = self._explain(_POSITION.sub("", str(err)), q, query, pos)
             self.issue(severity, msg, idx, *((int(pos[1]), int(pos[2])) if pos else ()))
+        if q is None:
             return []
         try:
             annotate_types(q, schema=mapping, dialect=D)
@@ -633,11 +674,11 @@ class _Analyzer:
             nodes = {}
         # conds: per SELECT, shared by every column passing through it; nodes: sqlglot's to_node cache
         ctx = SimpleNamespace(scopes=scopes, mapping=mapping, conds={}, nodes={})
-        unresolved = set()
+        stuck = set()
         out = []
         for sel in q.selects:
             name = sel.alias_or_name
-            srcs, steps, indirect = set(), [], set()
+            srcs, steps, indirect, unresolved = set(), [], set(), set()
             try:
                 node = nodes.get(name) or _sg_lineage(name, q, **kw)
             except Exception as e:  # sqlglot internals; keep the column's position, carry on
@@ -664,9 +705,11 @@ class _Analyzer:
             if name == "*":
                 self.issue("warning", f"SELECT * not expanded: table schema unknown{self._no_schema()}", idx)
             typ = sel.type.sql(D) if sel.type and not sel.type.is_type(exp.DataType.Type.UNKNOWN) else "STRING"
-            out.append((case.get(name.lower(), name), srcs, typ, {"steps": steps, "indirect": indirect}))
-        if unresolved:
-            self.issue("warning", f"Lineage stops at {', '.join(sorted(unresolved))}: source not found", idx)
+            out.append((case.get(name.lower(), name), srcs, typ,
+                        {"steps": steps, "indirect": indirect, "unresolved": unresolved}))
+            stuck |= unresolved
+        if stuck and err is None:  # with an error, that message already says why these are stuck
+            self.issue("warning", f"Lineage stops at {', '.join(sorted(stuck))}: source not found", idx)
         return out
 
     def _col_key(self, t: exp.Table, name: str) -> str:
@@ -729,19 +772,54 @@ class _Analyzer:
             return leaves | (self._conditions(src, ctx)[1] if isinstance(src.expression, exp.Select) else set())
         return set()
 
-    def _explain(self, msg, query) -> tuple[str, str]:
-        """(severity, message) for a qualify failure. Unresolved names are errors only when every schema is known."""
+    def _explain(self, msg, q, query, pos) -> tuple[str, str]:
+        """(severity, message) for a name qualify() couldn't resolve, judged by the sources visible where it
+        appears in `q` (qualified without validation, so stars are expanded). An error only when certain;
+        a warning when some source's columns are unknown."""
+        unknown_tables = sorted({self.fqn(t) for t in query.find_all(exp.Table) if t.db and not self._cols(t)})
+        hint = (f" (schema unknown for {', '.join(unknown_tables)})" if unknown_tables else "") + self._no_schema()
         m = _UNRESOLVED.search(msg)
-        if not m:
-            return "error", msg
-        col, alias = m[1], m[2]
-        tables = [t for t in query.find_all(exp.Table) if t.db]  # normalized real tables, not CTEs
-        hits = [f"{t.alias_or_name} ({self.fqn(t)})" for t in tables if col.lower() in {c.lower() for c in self._cols(t)}]
-        if len(hits) > 1 and not alias:
-            return "error", f"Column `{col}` is ambiguous, present in: {', '.join(hits)}. Qualify it with a table alias."
-        unknown = sorted({self.fqn(t) for t in tables if not self._cols(t)})
-        if unknown:
-            return "warning", f"Column `{col}` not resolved: schema unknown for {', '.join(unknown)}{self._no_schema()}"
+        scope = None
+        if m and q is not None and pos:
+            line, col = int(pos[1]), int(pos[2])
+            scope = next((s for s in build_scope(q).traverse()
+                          if any(c.this.meta.get("line") == line and c.this.meta.get("col") == col for c in s.columns)),
+                         None)
+        if scope is None:  # e.g. "Cannot automatically join": blame missing schemas when there are any
+            return ("warning", msg + hint) if unknown_tables else ("error", msg)
+
+        def describe(s, n):  # ("cte1 AS c1" / "proj.ds.t", its lower-cased columns or None if unknown)
+            node, src = s.selected_sources[n]
+            if isinstance(src, exp.Table):
+                what, cols = self.fqn(src), {c.lower() for c in self._cols(src)} or None
+            else:
+                names = src.expression.named_selects if isinstance(src, Scope) else []
+                what = node.name if isinstance(node, exp.Table) else "subquery"
+                cols = None if not names or "*" in names else {c.lower() for c in names}
+            return (what if what == n else f"{what} AS {n}"), cols
+
+        name, alias = m[1], (m[2] or "").lower()
         if alias:
-            return "error", f"`{alias}.{col}`: `{alias}` is not a table alias or column in this query"
-        return "error", f"Column `{col}` not found in any source of this query"
+            s = scope
+            while s is not None and alias not in s.selected_sources:  # outward: correlated references
+                s = s.parent
+            if s is None:
+                if any(describe(scope, n)[1] is None for n in scope.selected_sources):
+                    return "warning", f"`{alias}.{name}` not resolved: `{alias}` is no table alias here and some columns are unknown{hint}"
+                return "error", f"`{alias}.{name}`: `{alias}` is not a table alias or column in this query"
+            what, cols = describe(s, alias)
+            if cols is None:
+                return "warning", f"Column `{alias}.{name}` not resolved: columns of {what} unknown{hint}"
+            if name.lower() not in cols:
+                return "error", f"Column `{name}` not found in {what}"
+            return "warning", f"Column `{alias}.{name}` could not be resolved{hint}"
+        here = [describe(scope, n) for n in scope.selected_sources]
+        hits = [what for what, cols in here if cols and name.lower() in cols]
+        if len(hits) > 1:
+            return "error", f"Column `{name}` is ambiguous, present in: {', '.join(hits)}. Qualify it with a table alias."
+        unknown = [what for what, cols in here if cols is None]
+        if unknown:
+            return "warning", f"Column `{name}` not resolved: columns unknown for {', '.join(unknown)}{hint}"
+        if not hits:
+            return "error", f"Column `{name}` not found in {', '.join(what for what, _ in here) or 'this query'}"
+        return "warning", f"Column `{name}` could not be resolved{hint}"

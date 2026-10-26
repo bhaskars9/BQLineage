@@ -4,7 +4,7 @@ Table- and column-level lineage for BigQuery SQL, built on [sqlglot](https://git
 
 Handles single queries and whole scripts (statements separated by `;`, `--` / `#` / `/* */` comments):
 
-- **Queries:** CTEs (incl. `WITH RECURSIVE`), nested subqueries, `UNION`, `UNNEST` / structs / implicit `FROM t, t.arr`, `PIVOT`/`UNPIVOT`, `QUALIFY`, `SELECT * EXCEPT/REPLACE`, wildcard tables (`events_*`, `_TABLE_SUFFIX`), pseudo-columns (`_PARTITIONTIME`).
+- **Queries:** CTEs (incl. `WITH RECURSIVE`, and `AS ( WITH … )` in parentheses), nested subqueries, `UNION`, `JOIN … USING (…)` (incl. `c1.* EXCEPT (…), c2.* EXCEPT (…)` and CTEs that repeat a column name), `UNNEST` / structs / implicit `FROM t, t.arr`, `PIVOT`/`UNPIVOT`, `QUALIFY`, `SELECT * EXCEPT/REPLACE`, wildcard tables (`events_*`, `_TABLE_SUFFIX`), pseudo-columns (`_PARTITIONTIME`).
 - **Statements:** `CREATE [TEMP] TABLE … AS`, `CLONE`/`COPY`/`LIKE`, `CREATE [MATERIALIZED] VIEW`, `INSERT`, `MERGE` (incl. `INSERT ROW`), `UPDATE … FROM`, `EXPORT DATA`.
 - **Temp tables and views:** traced through to base tables. A re-created temp table is versioned (`_SESSION.t`, `_SESSION.t#2`), so each reader keeps the right lineage.
 - **Scripting:** `DECLARE`/`SET` variables, `SET @@dataset_id`, and the SQL inside `BEGIN…END`, `IF/ELSEIF/ELSE`, `LOOP`, `WHILE`, `REPEAT`, `FOR … IN`, `CASE`, `EXCEPTION` blocks. Every branch is analyzed, like straight-line code.
@@ -14,6 +14,7 @@ Handles single queries and whole scripts (statements separated by `;`, `--` / `#
 - **Errors** are definite problems: syntax errors, unknown tables, ambiguous columns, columns missing from known schemas, column-count mismatches.
 - **Warnings** mean the tool couldn't know. For example, a table's schema was unavailable, or the statement uses `EXECUTE IMMEDIATE` or `CALL`.
 - One bad statement doesn't stop the rest of the script from being analyzed.
+- One unresolvable column doesn't stop the rest of its statement. The other columns keep their lineage, and the stuck one lists what it couldn't resolve under `unresolved`.
 
 ## Install
 
@@ -62,7 +63,8 @@ Each target column shows where its values come from, what decides its rows, and 
 - **`sources`** are the columns whose values flow into this column.
 - **`indirect_sources`** are the columns read by the JOIN / WHERE / GROUP BY / HAVING / QUALIFY conditions along the way, including subqueries such as `NOT IN (SELECT …)`. These decide which rows and groups exist.
 - **`steps`** run from the target back through CTEs (`"in"` names the statement), subqueries, temp tables and views. Each step has its expression and conditions. Names in step text are lower-cased, because BigQuery column names and aliases ignore case.
-- **An empty `sources` list** means the value doesn't come from a table column. The first step's expression shows what it is: a constant (`'ETL'`), a function (`CURRENT_TIMESTAMP()`) or a script variable (`@run_date`). If a column's source genuinely can't be found, you get a "Lineage stops at …" warning.
+- **An empty `sources` list** means the value doesn't come from a table column. The first step's expression shows what it is: a constant (`'ETL'`), a function (`CURRENT_TIMESTAMP()`) or a script variable (`@run_date`).
+- **`unresolved`** appears only when lineage got stuck. It lists the references whose source couldn't be found, usually because a table's schema is unknown, and a warning says which table.
 
 ## Python
 

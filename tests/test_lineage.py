@@ -202,7 +202,8 @@ def test_works_without_schema_for_qualified_columns():
     assert r.ok and r.column_lineage() == {"<query>.x": ["p.d.a.x"], "<query>.y": ["p.d.b.y"]}
     # no schema: can't tell which table owns x -> a warning (the query may be fine), and nothing guessed
     r = analyze("SELECT x FROM `p.d.a` a JOIN `p.d.b` b ON a.id = b.id")
-    assert r.ok and r.issues[0].severity == "warning" and r.column_lineage() == {}
+    assert r.ok and r.issues[0].severity == "warning" and r.column_lineage() == {"<query>.x": []}
+    assert r.column_details()["<query>.x"]["unresolved"] == ["x"]
 
 
 def test_comments_and_statement_numbering(schema):
@@ -434,6 +435,81 @@ def test_merge_and_update_conditions_are_in_the_steps(schema):
     d = r.column_details()["p.dw.fact.total"]
     assert d["steps"][0]["where"] == "f.order_id = o.order_id"
     assert d["indirect_sources"] == ["p.dw.fact.order_id", "p.sales.orders.order_id"]
+
+
+USING_TABLES = {
+    "p.d.t1": {"k1": "INT64", "k2": "STRING", "k3": "DATE", "a": "FLOAT64", "col77": "STRING", "load_ts": "TIMESTAMP"},
+    "p.d.t2": {"k1": "INT64", "k2": "STRING", "k3": "DATE", "b": "STRING", "col88": "STRING", "load_ts": "TIMESTAMP"},
+    "p.d.t3": {"k1": "INT64", "k2": "STRING", "c": "INT64"},
+    "p.d.out": {"k1": "INT64", "k2": "STRING", "k3": "DATE", "a": "FLOAT64", "c": "INT64"},
+}
+USING_CTES = """
+WITH cte1 AS (SELECT * FROM `p.d.t1` WHERE a > 0),
+     cte2 AS (SELECT * FROM `p.d.t2`),
+     cte3 AS (SELECT * FROM `p.d.t3`),
+"""
+
+
+def test_using_join_ctes_with_qualified_star_except():
+    # c1.* EXCEPT (...), c2.* EXCEPT (...) over a USING join; load_ts survives both EXCEPTs, so j repeats it.
+    # BigQuery allows that as long as load_ts isn't referenced; sqlglot used to stop expanding j.* -> no lineage.
+    sql = "INSERT INTO `p.d.out`" + USING_CTES + """
+         j AS (SELECT c1.* EXCEPT (col77), c2.* EXCEPT (col88, b)
+               FROM cte1 c1 LEFT JOIN cte2 c2 USING (k1, k2, k3)),
+         j2 AS (SELECT j.*, c3.c FROM j LEFT JOIN cte3 c3 USING (k1, k2))
+    SELECT k1, k2, k3, a, c FROM j2"""
+    r = analyze(sql, DictSchemaProvider(USING_TABLES))
+    assert r.ok and not r.issues, r.issues
+    assert r.column_lineage() == {
+        "p.d.out.a": ["p.d.t1.a"],
+        "p.d.out.c": ["p.d.t3.c"],
+        "p.d.out.k1": ["p.d.t1.k1", "p.d.t2.k1", "p.d.t3.k1"],  # USING keys merge both sides
+        "p.d.out.k2": ["p.d.t1.k2", "p.d.t2.k2", "p.d.t3.k2"],
+        "p.d.out.k3": ["p.d.t1.k3", "p.d.t2.k3"],
+    }
+    assert "p.d.t1.a" in r.column_details()["p.d.out.k1"]["indirect_sources"]  # cte1's WHERE a > 0
+
+
+def test_select_star_over_cte_with_repeated_names():
+    # was a false "Column `k1` is ambiguous" error and no lineage for the whole statement
+    sql = USING_CTES + """
+         j AS (SELECT * FROM cte1 c1 LEFT JOIN cte2 c2 USING (k1, k2, k3)),
+         j2 AS (SELECT * FROM j)
+    SELECT k1, a, b FROM j2"""
+    r = analyze(sql, DictSchemaProvider(USING_TABLES))
+    assert r.ok and not r.issues, r.issues
+    assert r.column_lineage() == {"<query>.a": ["p.d.t1.a"], "<query>.b": ["p.d.t2.b"],
+                                  "<query>.k1": ["p.d.t1.k1", "p.d.t2.k1"]}
+
+
+def test_temp_table_from_parenthesized_cte_query_gets_its_schema():
+    # CREATE ... AS ( WITH ... ) used to lose every CTE column, so the temp table got no schema and each
+    # statement reading it failed too
+    sql = """
+    CREATE TEMP TABLE stage AS (
+      WITH c1 AS (SELECT * FROM `p.d.t1`), c2 AS (SELECT * FROM `p.d.t2`),
+           j AS (SELECT * FROM c1 LEFT JOIN c2 USING (k1, k2, k3))  -- load_ts, from both sides
+      SELECT * FROM j
+    );
+    INSERT INTO `p.d.out` (k1, a) (SELECT k1, a FROM stage);
+    """
+    r = analyze(sql, DictSchemaProvider(USING_TABLES))
+    assert r.ok and not r.issues, r.issues
+    assert r.column_lineage() == {"p.d.out.a": ["p.d.t1.a"], "p.d.out.k1": ["p.d.t1.k1", "p.d.t2.k1"]}
+
+
+def test_missing_schema_keeps_lineage_of_the_other_columns():
+    partial = DictSchemaProvider({k: v for k, v in USING_TABLES.items() if k != "p.d.t2"})
+    r = analyze("WITH cte1 AS (SELECT k1, k2, k3, a FROM `p.d.t1`), cte2 AS (SELECT k1, k2, k3, b FROM `p.d.t2`)\n"
+                "SELECT k1, a, b FROM cte1 c1 LEFT JOIN cte2 c2 USING (k1, k2, k3)", partial)
+    assert [i.severity for i in r.issues] == ["error", "warning"]  # t2 not found; then why b can't be traced
+    assert "schema unknown for p.d.t2" in r.issues[1].message
+    d = r.column_details()
+    assert d["<query>.a"]["sources"] == ["p.d.t1.a"] and d["<query>.k1"]["sources"] == ["p.d.t1.k1"]
+    assert d["<query>.b"]["sources"] == [] and d["<query>.b"]["unresolved"]
+    # SELECT * CTEs over the missing table: a warning, not "Cannot automatically join"
+    r = analyze(USING_CTES + " j AS (SELECT * FROM cte1 c1 LEFT JOIN cte2 c2 USING (k1, k2, k3))\nSELECT * FROM j", partial)
+    assert all("Cannot automatically join" not in i.message for i in r.issues), r.issues
 
 
 def test_wide_tables_stay_fast():
