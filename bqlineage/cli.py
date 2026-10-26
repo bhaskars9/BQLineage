@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -22,11 +23,16 @@ def _provider(args):
     if args.schema:
         return DictSchemaProvider.from_json(args.schema, args.project)
     if args.bq:
-        return BigQuerySchemaProvider(args.project)
+        try:
+            return BigQuerySchemaProvider(args.project)
+        except Exception as e:  # no credentials / no default project
+            sys.exit(f"Could not connect to BigQuery: {e}\n"
+                     "Run `bqlineage auth` (or set GOOGLE_APPLICATION_CREDENTIALS) and pass --project.")
     return None
 
 
 def main(argv=None) -> int:
+    logging.getLogger("sqlglot").setLevel(logging.ERROR)  # unsupported syntax is reported as our own warnings
     p = argparse.ArgumentParser(prog="bqlineage", description="BigQuery table/column lineage")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("auth", help="log in with gcloud Application Default Credentials")
@@ -42,6 +48,8 @@ def main(argv=None) -> int:
     lp = sub.choices["lineage"]
     lp.add_argument("--level", choices=["table", "column", "both"], default="both")
     lp.add_argument("--raw", action="store_true", help="don't trace through temp tables/views")
+    lp.add_argument("--table", help="only this target table: project.dataset.table, dataset.table or table")
+    lp.add_argument("--columns", nargs="+", metavar="COL", help="only these target columns (space or comma separated)")
     args = p.parse_args(argv)
 
     if args.cmd == "auth":
@@ -59,7 +67,12 @@ def main(argv=None) -> int:
         print("OK" if result.ok else "FAILED")
         return 0 if result.ok else 1
 
-    out = result.to_dict(resolve=not args.raw)
+    if args.table and not result.targets(args.table):
+        sys.exit(f"No target table matches `{args.table}`. Targets: {', '.join(result.targets()) or 'none'}")
+    columns = [c for arg in args.columns or [] for c in arg.split(",") if c] or None
+    out = result.to_dict(not args.raw, args.table, columns)
+    if columns and not out["columns"]:
+        sys.exit(f"None of the columns {', '.join(columns)} found" + (f" in `{args.table}`" if args.table else ""))
     if args.level == "table":
         out.pop("columns")
     elif args.level == "column":

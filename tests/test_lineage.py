@@ -1,9 +1,10 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import Forbidden, NotFound
 
 from bqlineage import BigQuerySchemaProvider, DictSchemaProvider, LineageError, analyze, validate
 from bqlineage import cli
@@ -199,12 +200,203 @@ def test_unnest_struct_and_star(schema):
 def test_works_without_schema_for_qualified_columns():
     r = analyze("SELECT a.x, b.y FROM `p.d.a` a JOIN `p.d.b` b ON a.id = b.id")
     assert r.ok and r.column_lineage() == {"<query>.x": ["p.d.a.x"], "<query>.y": ["p.d.b.y"]}
-    assert not analyze("SELECT x FROM `p.d.a` a JOIN `p.d.b` b ON a.id = b.id").ok  # no schema -> no guessing
+    # no schema: can't tell which table owns x -> a warning (the query may be fine), and nothing guessed
+    r = analyze("SELECT x FROM `p.d.a` a JOIN `p.d.b` b ON a.id = b.id")
+    assert r.ok and r.issues[0].severity == "warning" and r.column_lineage() == {}
 
 
-def test_unparsed_statement_warns():
-    r = analyze("DECLARE x INT64 DEFAULT 1; SELECT 1 AS one")
-    assert r.ok
+def test_comments_and_statement_numbering(schema):
+    sql = """-- header
+    /* block
+       comment */
+    INSERT INTO sales.orders (order_id)  -- target
+    SELECT /* inline */ emp_id FROM hr.employees;  -- trailing comment
+    /* next */
+    SELECT nope FROM hr.employees;
+    -- end of script
+    """
+    r = analyze(sql, schema)
+    assert r.column_lineage()["p.sales.orders.order_id"] == ["p.hr.employees.emp_id"]
+    assert [i.statement for i in r.issues] == [2]
+
+
+def test_no_schema_source_is_named_in_errors():
+    r = analyze("INSERT d.t SELECT x FROM `p.d.a` a JOIN `p.d.b` b ON a.id = b.id")
+    assert all("no schema source given" in i.message for i in r.issues) and len(r.issues) == 2
+
+
+def test_dynamic_sql_and_calls_warn():
+    r = analyze("EXECUTE IMMEDIATE 'SELECT 1';\nCALL ds.proc();\nSELECT 1 AS one")
+    assert r.ok and [i.message.split()[0] for i in r.issues] == ["EXECUTE", "CALL"]
+
+
+def test_script_and_loop_variables_are_not_columns(schema):
+    sql = """
+    DECLARE run_date DATE DEFAULT CURRENT_DATE();
+    DECLARE cfg STRUCT<min_amt FLOAT64>;
+    INSERT INTO dw.fact (order_id, total)
+    SELECT order_id, amount FROM sales.orders WHERE DATE(order_ts) = run_date AND amount > cfg.min_amt;
+    FOR rec IN (SELECT customer_id FROM sales.customers) DO
+      INSERT INTO dw.fact (order_id) SELECT order_id FROM sales.orders WHERE cust_id = rec.customer_id;
+    END FOR;
+    """
+    r = analyze(sql, schema)
+    assert r.ok and not r.issues, r.issues
+    assert r.column_lineage() == {"p.dw.fact.order_id": ["p.sales.orders.order_id"],
+                                  "p.dw.fact.total": ["p.sales.orders.amount"]}
+
+
+def test_column_wins_over_variable_of_same_name(schema):
+    assert cols("DECLARE amount FLOAT64 DEFAULT 0;\nSELECT amount FROM sales.orders", schema) == {
+        "<query#2>.amount": ["p.sales.orders.amount"]}
+
+
+def test_procedural_blocks_are_analyzed(schema):
+    sql = """
+    BEGIN
+      DECLARE x INT64 DEFAULT 1;
+      CREATE TEMP TABLE s AS SELECT order_id, amount FROM sales.orders;
+      IF x > 0 THEN
+        INSERT INTO dw.fact (order_id) SELECT order_id FROM s;
+      ELSEIF x < 0 THEN
+        INSERT INTO dw.fact (total) SELECT amount FROM s;
+      ELSE
+        SELECT 1;
+      END IF;
+      outer_loop: LOOP
+        SET x = x + 1;
+        IF x > 3 THEN LEAVE outer_loop; END IF;
+      END LOOP;
+      WHILE x < 5 DO
+        UPDATE dw.fact SET customer_name = (SELECT MAX(name) FROM sales.customers) WHERE TRUE;
+        SET x = x + 1;
+      END WHILE;
+      REPEAT
+        SET x = x - 1;
+      UNTIL x <= 0 END REPEAT;
+      CASE x
+        WHEN 0 THEN MERGE dw.fact T USING s ON T.order_id = s.order_id WHEN NOT MATCHED THEN INSERT (order_id) VALUES (s.order_id);
+        ELSE SELECT 2;
+      END CASE;
+    EXCEPTION WHEN ERROR THEN
+      SELECT @@error.message;
+    END;
+    """
+    r = analyze(sql, schema)
+    assert r.ok and not r.issues, r.issues
+    assert r.column_lineage(table="dw.fact") == {
+        "p.dw.fact.customer_name": ["p.sales.customers.name"],
+        "p.dw.fact.order_id": ["p.sales.orders.order_id"],
+        "p.dw.fact.total": ["p.sales.orders.amount"],
+    }
+
+
+def test_syntax_error_in_one_statement_keeps_the_rest(schema):
+    r = analyze("INSERT INTO dw.fact (order_id) SELECT order_id FROM sales.orders;\nSELECT FROM WHERE;\n"
+                "INSERT INTO dw.fact (total) SELECT amount FROM sales.orders;", schema)
+    assert [(i.severity, i.statement, i.line) for i in r.issues] == [("error", 2, 2)]
+    assert "<Token" not in r.issues[0].message
+    assert set(r.column_lineage()) == {"p.dw.fact.order_id", "p.dw.fact.total"}
+
+
+def test_windows_bom_and_crlf(schema):
+    r = analyze("﻿-- header\r\nSELECT order_id\r\nFROM sales.orders\r\nWHERE nope = 1;\r\n", schema)
+    assert [(i.severity, i.line) for i in r.issues] == [("error", 4)] and "nope" in r.issues[0].message
+
+
+def test_set_default_dataset(schema):
+    assert cols("SET @@dataset_id = 'sales';\nSELECT order_id FROM orders", schema) == {
+        "<query#2>.order_id": ["p.sales.orders.order_id"]}
+
+
+def test_recreated_temp_table_keeps_each_version_apart(schema):
+    sql = """
+    CREATE TEMP TABLE t AS SELECT order_id AS k, amount FROM sales.orders;
+    INSERT INTO dw.fact (order_id) SELECT k FROM t;
+    CREATE OR REPLACE TEMP TABLE t AS SELECT k, amount * 2 AS amount FROM t WHERE k > 0;  -- refines the old t
+    INSERT INTO dw.fact (total) SELECT amount FROM t;
+    CREATE OR REPLACE TEMP TABLE t AS SELECT customer_id AS k FROM sales.customers;
+    INSERT INTO hr.employees (emp_id) SELECT k FROM t;
+    """
+    r = analyze(sql, schema)
+    assert r.ok, r.issues
+    assert r.column_lineage() == {
+        "p.dw.fact.order_id": ["p.sales.orders.order_id"],
+        "p.dw.fact.total": ["p.sales.orders.amount"],
+        "p.hr.employees.emp_id": ["p.sales.customers.customer_id"],
+    }
+    assert r.temp_tables == {"_SESSION.t", "_SESSION.t#2", "_SESSION.t#3"}
+
+
+def test_clone_copy_like(schema):
+    r = analyze("CREATE TABLE dw.c1 CLONE hr.employees;\nCREATE TABLE dw.c2 LIKE hr.employees;\n"
+                "SELECT emp_name FROM dw.c1;\nSELECT emp_name FROM dw.c2;", schema)
+    assert r.ok, r.issues
+    c = r.column_lineage()
+    assert c["p.dw.c1.emp_name"] == ["p.hr.employees.emp_name"]
+    assert c["<query#3>.emp_name"] == ["p.dw.c1.emp_name"]
+    assert c["<query#4>.emp_name"] == ["p.dw.c2.emp_name"]  # LIKE copies the schema, not the data
+    assert "p.dw.c2" not in r.table_lineage()
+
+
+def test_merge_insert_values_without_column_list(schema):
+    sql = ("MERGE dw.fact T USING sales.orders S ON T.order_id = S.order_id "
+           "WHEN NOT MATCHED THEN INSERT VALUES (S.order_id, 'x', S.amount)")
+    assert cols(sql, schema) == {"p.dw.fact.customer_name": [], "p.dw.fact.order_id": ["p.sales.orders.order_id"],
+                                 "p.dw.fact.total": ["p.sales.orders.amount"]}
+    r = analyze("MERGE `p.d.x` T USING `p.d.o` S ON T.id = S.id WHEN NOT MATCHED THEN INSERT VALUES (S.id)")
+    assert r.ok and "INSERT without column list not mapped" in r.issues[0].message
+
+
+def test_information_schema_and_export(schema):
+    r = analyze("SELECT table_name FROM sales.INFORMATION_SCHEMA.TABLES", schema)
+    assert r.ok and r.table_lineage() == {"<query>": ["p.sales.INFORMATION_SCHEMA.TABLES"]}
+    r = analyze("EXPORT DATA OPTIONS (uri = 'gs://b/o-*.csv', format = 'CSV') AS SELECT order_id FROM sales.orders", schema)
+    assert r.column_lineage() == {"gs://b/o-*.csv.order_id": ["p.sales.orders.order_id"]}
+
+
+def test_names_keep_their_case_and_ctes_are_case_insensitive():
+    s = DictSchemaProvider({"p.d.Customers": {"CustomerID": "INT64", "FullName": "STRING"}})
+    assert cols("WITH Recent AS (SELECT * FROM `p.d.Customers`) SELECT customerid, FULLNAME AS DisplayName FROM recent", s) == {
+        "<query>.DisplayName": ["p.d.Customers.FullName"], "<query>.customerid": ["p.d.Customers.CustomerID"]}
+
+
+def test_unknown_alias_message(schema):
+    issues = validate("SELECT x.order_id FROM sales.orders o", schema=schema)
+    assert issues[0].severity == "error" and "`x` is not a table alias" in issues[0].message
+
+
+def test_star_over_unknown_schema_warns_instead_of_count_error():
+    r = analyze("INSERT INTO `p.d.t` (a, b) SELECT * FROM `p.d.src`;\n"
+                "CREATE TEMP TABLE x AS SELECT *, 1 AS one FROM `p.d.src`;\nSELECT a FROM x")
+    assert r.ok and r.issues, r.issues
+
+
+def test_offline_schema_keys_may_omit_project():
+    s = DictSchemaProvider({"sales.orders": {"order_id": "INT64"}})
+    assert cols("SELECT order_id FROM sales.orders", s, project="p") == {"<query>.order_id": ["p.sales.orders.order_id"]}
+
+
+def test_filter_by_table_and_columns(schema):
+    r = analyze("INSERT INTO dw.fact (order_id, total) SELECT order_id, amount FROM sales.orders;\n"
+                "CREATE TABLE dw.other AS SELECT customer_id, name FROM sales.customers;", schema)
+    assert r.targets() == ["p.dw.fact", "p.dw.other"]
+    for t in ("p.dw.fact", "dw.fact", "fact"):
+        assert r.table_lineage(table=t) == {"p.dw.fact": ["p.sales.orders"]}
+    assert r.column_lineage(table="fact", columns=["TOTAL"]) == {"p.dw.fact.total": ["p.sales.orders.amount"]}
+    assert set(r.column_lineage(columns=["order_id", "name"])) == {"p.dw.fact.order_id", "p.dw.other.name"}
+    assert r.table_lineage(table="act") == {}  # matches whole name parts only
+
+
+def test_wide_tables_stay_fast():
+    import time
+    cols_ = {f"c{i}": "INT64" for i in range(200)}
+    s = DictSchemaProvider({"p.d.wide": cols_, "p.d.out": cols_})
+    ctes = ", ".join(f"s{i} AS (SELECT * FROM {'`p.d.wide`' if i == 0 else f's{i - 1}'})" for i in range(4))
+    t0 = time.time()
+    r = analyze(f"INSERT INTO `p.d.out` WITH {ctes} SELECT * FROM s3", s)
+    assert r.ok and r.column_lineage()["p.d.out.c199"] == ["p.d.wide.c199"]
+    assert time.time() - t0 < 5  # was quadratic (~20s+) when sqlglot trimmed selects per column
 
 
 # ---- BigQuery provider with a mocked client (no BigQuery access needed) -----------------------
@@ -266,3 +458,62 @@ def test_cli(tmp_path, capsys):
         rc = cli.main(["lineage", str(tmp_path / "q.sql"), "--bq", "--level", "table"])
     assert rc == 1  # customers isn't in the mocked BigQuery -> reported, not guessed
     assert "not found" in capsys.readouterr().out
+
+
+def test_permission_denied_is_reported_not_raised():
+    client = mock_client()
+    original = client.get_table.side_effect
+
+    def get_table(fqn):
+        if "secret" in str(fqn):
+            raise Forbidden("Access Denied: Table p:secret.t")
+        return original(fqn)
+
+    client.get_table.side_effect = get_table
+    r = analyze("SELECT o.order_id, s.x FROM sales.orders o JOIN secret.t s ON TRUE", BigQuerySchemaProvider(client=client))
+    assert r.issues[0].severity == "error" and "Access Denied" in r.issues[0].message
+    assert r.column_lineage() == {"<query>.order_id": ["p.sales.orders.order_id"], "<query>.x": ["p.secret.t.x"]}
+
+
+def test_wildcard_table_uses_newest_shard_schema():
+    client = mock_client()
+    client.list_tables.return_value = [
+        SimpleNamespace(table_id="events_20240101", created=datetime(2024, 1, 2), reference="p.sales.events_20240101"),
+        SimpleNamespace(table_id="events_20240102", created=datetime(2024, 1, 3), reference="p.sales.events_20240102"),
+        SimpleNamespace(table_id="orders", created=datetime(2025, 1, 1), reference="p.sales.orders"),
+    ]
+    shard = SimpleNamespace(table_type="TABLE", view_query=None, schema=[field("event_name", "STRING")])
+    original = client.get_table.side_effect
+    client.get_table.side_effect = lambda ref: shard if ref == "p.sales.events_20240102" else original(ref)
+    r = analyze("SELECT event_name, _TABLE_SUFFIX AS sfx FROM `p.sales.events_*` WHERE _TABLE_SUFFIX > '2024'",
+                BigQuerySchemaProvider(client=client))
+    assert r.ok, r.issues
+    assert r.column_lineage() == {"<query>.event_name": ["p.sales.events_*.event_name"],
+                                  "<query>.sfx": ["p.sales.events_*._TABLE_SUFFIX"]}
+
+
+def test_cli_table_and_column_filter(tmp_path, capsys):
+    (tmp_path / "s.json").write_text(json.dumps(TABLES))
+    (tmp_path / "q.sql").write_text("INSERT INTO dw.fact (order_id, total) SELECT order_id, amount FROM sales.orders;\n"
+                                    "CREATE TABLE dw.other AS SELECT customer_id FROM sales.customers;")
+    base = ["lineage", str(tmp_path / "q.sql"), "--schema", str(tmp_path / "s.json"), "--project", "p"]
+    assert cli.main(base + ["--table", "dw.fact", "--columns", "total"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["tables"] == {"p.dw.fact": ["p.sales.orders"]}
+    assert out["columns"] == {"p.dw.fact.total": ["p.sales.orders.amount"]}
+    assert cli.main(base + ["--columns", "order_id,customer_id", "--level", "column"]) == 0
+    assert set(json.loads(capsys.readouterr().out)["columns"]) == {"p.dw.fact.order_id", "p.dw.other.customer_id"}
+    with pytest.raises(SystemExit, match="Targets: p.dw.fact, p.dw.other"):
+        cli.main(base + ["--table", "nope"])
+    with pytest.raises(SystemExit, match="None of the columns"):
+        cli.main(base + ["--table", "fact", "--columns", "nope"])
+
+
+def test_cli_bq_without_credentials_exits_cleanly(tmp_path):
+    (tmp_path / "q.sql").write_text("SELECT 1")
+
+    def no_credentials(project):
+        raise RuntimeError("Your default credentials were not found")
+
+    with patch("bqlineage.cli.BigQuerySchemaProvider", no_credentials), pytest.raises(SystemExit, match="bqlineage auth"):
+        cli.main(["lineage", str(tmp_path / "q.sql"), "--bq"])
