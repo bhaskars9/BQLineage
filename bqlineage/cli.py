@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from .core import analyze
+from .drawio import to_drawio
 from .schema import BigQuerySchemaProvider, DictSchemaProvider
 
 
@@ -50,6 +51,7 @@ def main(argv=None) -> int:
     lp.add_argument("--raw", action="store_true", help="don't trace through temp tables/views")
     lp.add_argument("--table", help="only this target table: project.dataset.table, dataset.table or table")
     lp.add_argument("--columns", nargs="+", metavar="COL", help="only these target columns (space or comma separated)")
+    lp.add_argument("--drawio", metavar="FILE", help="also write a draw.io diagram (pages follow --level)")
     args = p.parse_args(argv)
 
     if args.cmd == "auth":
@@ -73,6 +75,10 @@ def main(argv=None) -> int:
     out = result.to_dict(not args.raw, args.table, columns)
     if columns and not out["columns"]:
         sys.exit(f"None of the columns {', '.join(columns)} found" + (f" in `{args.table}`" if args.table else ""))
+    if args.drawio:
+        with open(args.drawio, "w", encoding="utf-8") as f:
+            f.write(to_drawio(result, args.level, not args.raw, args.table, columns))
+        print(f"wrote {args.drawio} (open it in draw.io / diagrams.net)", file=sys.stderr)
     if args.level == "table":
         out.pop("columns")
     elif args.level == "column":

@@ -1,0 +1,5 @@
+{
+  "shop.sales.orders": {"order_id": "INT64", "customer_id": "INT64", "amount": "NUMERIC", "status": "STRING", "order_ts": "TIMESTAMP"},
+  "shop.crm.customers": {"customer_id": "INT64", "name": "STRING", "region": "STRING", "email": "STRING"},
+  "shop.dw.customer_revenue": {"customer_id": "INT64", "customer_name": "STRING", "region": "STRING", "revenue": "NUMERIC", "loaded_at": "TIMESTAMP"}
+}

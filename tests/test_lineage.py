@@ -512,6 +512,35 @@ def test_missing_schema_keeps_lineage_of_the_other_columns():
     assert all("Cannot automatically join" not in i.message for i in r.issues), r.issues
 
 
+def test_drawio_export_of_the_example(tmp_path, capsys):
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+
+    from bqlineage.drawio import to_drawio
+
+    ex = Path(__file__).parent.parent / "examples"
+    out = tmp_path / "orders.drawio"
+    assert cli.main(["lineage", str(ex / "orders.sql"), "--schema", str(ex / "schema.json"), "--drawio", str(out)]) == 0
+    capsys.readouterr()
+    pages = {d.get("name"): d for d in ET.parse(out).getroot().iter("diagram")}
+    assert list(pages) == ["Tables", "Columns"]
+
+    def labels(page):
+        return {c.get("value") or c.get("label") for c in page.iter() if c.tag in ("mxCell", "UserObject")} - {None}
+
+    assert {"shop.sales.orders", "shop.crm.customers", "shop.dw.customer_revenue"} <= labels(pages["Tables"])
+    assert sum(c.get("edge") == "1" for c in pages["Tables"].iter("mxCell")) == 2
+    assert {"amount", "gross", "revenue", "loaded_at"} - labels(pages["Columns"]) == {"gross"}  # temp hidden
+    revenue = next(u for u in pages["Columns"].iter("UserObject") if u.get("label") == "revenue")
+    assert "SUM(p.gross)" in revenue.get("tooltip") and "o.status = 'PAID'" in revenue.get("tooltip")
+    assert sum(c.get("edge") == "1" for c in pages["Columns"].iter("mxCell")) == 5  # one per source column
+    raw = ET.fromstring(to_drawio(analyze((ex / "orders.sql").read_text(), DictSchemaProvider.from_json(
+        str(ex / "schema.json"))), "column", resolve=False))
+    assert "gross" in labels(raw)  # --raw keeps the temp table as a hop
+    plain = ET.fromstring(to_drawio(analyze("SELECT a.x FROM `p.d.a` a"), "table"))
+    assert "<query>" in labels(plain)  # labels are plain text, not HTML
+
+
 def test_wide_tables_stay_fast():
     import time
     cols_ = {f"c{i}": "INT64" for i in range(200)}

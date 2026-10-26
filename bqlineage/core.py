@@ -698,6 +698,8 @@ class _Analyzer:
                             label = None  # the statement's target column
                         elif s.scope_type == ScopeType.SUBQUERY:
                             label = f"(subquery).{label}"
+                        elif isinstance(s.expression.parent, exp.CTE):  # "c.x" -> "eu_customers.x"
+                            label = f"{s.expression.parent.alias}.{label.split('.')[-1]}"
                         step = {"label": label, "expression": expr.sql(D), **shape}
                         if step not in steps:
                             steps.append(step)
@@ -723,8 +725,7 @@ class _Analyzer:
             return ctx.conds[id(scope.expression)]
         ctx.conds[id(scope.expression)] = ({}, set())  # in progress: a recursive CTE refers to itself
         sel = scope.expression
-        shape = {"from": [self.fqn(s) + (f" AS {a}" if a != s.name else "") if isinstance(s, exp.Table) else a
-                          for a, (_, s) in scope.selected_sources.items()]}
+        shape = {"from": [self._source_label(a, node, src) for a, (node, src) in scope.selected_sources.items()]}
         parts = []
         joins = []
         for j in sel.args.get("joins") or []:
@@ -754,6 +755,14 @@ class _Analyzer:
                     indirect |= self._resolve(col, sub_scope, ctx)
         ctx.conds[id(scope.expression)] = (shape, indirect)
         return shape, indirect
+
+    def _source_label(self, alias: str, node, src) -> str:
+        """A FROM/JOIN item as a reader would name it: "proj.ds.t AS o", "eu_customers AS c", "(subquery) AS x"."""
+        if isinstance(src, exp.Table):
+            what = self.fqn(src)
+            return what if src.name == alias else f"{what} AS {alias}"
+        what = node.name if isinstance(node, exp.Table) else "(subquery)"  # CTE reference, or derived table
+        return what if what == alias else f"{what} AS {alias}"
 
     def _resolve(self, col: exp.Column, scope: Scope, ctx) -> set[str]:
         """Base table columns behind a column reference, looking outward for correlated references."""
@@ -791,12 +800,11 @@ class _Analyzer:
         def describe(s, n):  # ("cte1 AS c1" / "proj.ds.t", its lower-cased columns or None if unknown)
             node, src = s.selected_sources[n]
             if isinstance(src, exp.Table):
-                what, cols = self.fqn(src), {c.lower() for c in self._cols(src)} or None
+                cols = {c.lower() for c in self._cols(src)} or None
             else:
                 names = src.expression.named_selects if isinstance(src, Scope) else []
-                what = node.name if isinstance(node, exp.Table) else "subquery"
                 cols = None if not names or "*" in names else {c.lower() for c in names}
-            return (what if what == n else f"{what} AS {n}"), cols
+            return self._source_label(n, node, src), cols
 
         name, alias = m[1], (m[2] or "").lower()
         if alias:
