@@ -1,0 +1,20 @@
+[project]
+name = "bqlineage"
+version = "0.1.0"
+description = "BigQuery table- and column-level lineage, built on sqlglot"
+requires-python = ">=3.10"
+dependencies = ["sqlglot>=30.25,<31"]
+
+[project.optional-dependencies]
+bq = ["google-cloud-bigquery>=3"]
+test = ["pytest", "google-cloud-bigquery>=3"]
+
+[project.scripts]
+bqlineage = "bqlineage.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["bqlineage"]
