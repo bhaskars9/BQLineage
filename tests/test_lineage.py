@@ -388,6 +388,54 @@ def test_filter_by_table_and_columns(schema):
     assert r.table_lineage(table="act") == {}  # matches whole name parts only
 
 
+def test_column_details_show_how_and_where(schema):
+    sql = """
+    DECLARE run_date DATE DEFAULT CURRENT_DATE();
+    CREATE TEMP TABLE paid AS
+      SELECT o.order_id, o.cust_id, o.amount * 1.2 AS gross FROM sales.orders o
+      WHERE DATE(o.order_ts) = run_date AND o.order_id NOT IN (SELECT e.emp_id FROM hr.employees e);
+    INSERT INTO dw.fact (order_id, customer_name, total)
+    WITH big AS (SELECT * FROM paid WHERE gross > 100)
+    SELECT big.order_id, UPPER(c.name), SUM(big.gross)
+    FROM big JOIN sales.customers c ON big.cust_id = c.customer_id
+    WHERE c.region = 'EU'
+    GROUP BY big.order_id, c.name;
+    """
+    r = analyze(sql, schema)
+    assert r.ok and not r.issues, r.issues
+    d = r.column_details(table="fact")
+    total, name = d["p.dw.fact.total"], d["p.dw.fact.customer_name"]
+    assert total["sources"] == ["p.sales.orders.amount"] and name["sources"] == ["p.sales.customers.name"]
+    # everything that decides which rows/groups: join keys, both WHEREs, the CTE filter, the NOT IN subquery
+    assert total["indirect_sources"] == name["indirect_sources"] == [
+        "p.hr.employees.emp_id", "p.sales.customers.customer_id", "p.sales.customers.name", "p.sales.customers.region",
+        "p.sales.orders.amount", "p.sales.orders.cust_id", "p.sales.orders.order_id", "p.sales.orders.order_ts"]
+    assert total["steps"] == [
+        {"column": "p.dw.fact.total", "expression": "SUM(big.gross)", "from": ["big", "p.sales.customers AS c"],
+         "joins": ["JOIN c ON big.cust_id = c.customer_id"], "where": "c.region = 'EU'",
+         "group_by": ["big.order_id", "c.name"]},
+        {"column": "big.gross", "in": "p.dw.fact", "expression": "paid.gross", "from": ["_SESSION.paid"],
+         "where": "paid.gross > 100"},
+        {"column": "_SESSION.paid.gross", "expression": "o.amount * 1.2", "from": ["p.sales.orders AS o"],
+         "where": "DATE(o.order_ts) = @run_date AND NOT o.order_id IN "
+                  "(SELECT e.emp_id AS emp_id FROM p.hr.employees AS e)"},
+    ]
+    assert name["steps"][0]["expression"] == "UPPER(c.name)"
+    assert r.column_lineage(table="fact") == {k: v["sources"] for k, v in d.items()}
+
+
+def test_merge_and_update_conditions_are_in_the_steps(schema):
+    r = analyze("MERGE dw.fact T USING sales.orders S ON T.order_id = S.order_id "
+                "WHEN MATCHED AND S.amount > 0 THEN UPDATE SET total = S.amount", schema)
+    step = r.column_details()["p.dw.fact.total"]["steps"][0]
+    # aliases and columns are case-insensitive in BigQuery; step text shows them normalized to lower case
+    assert step["joins"] == ["JOIN s ON t.order_id = s.order_id"] and step["where"] == "s.amount > 0"
+    r = analyze("UPDATE dw.fact f SET total = o.amount FROM sales.orders o WHERE f.order_id = o.order_id", schema)
+    d = r.column_details()["p.dw.fact.total"]
+    assert d["steps"][0]["where"] == "f.order_id = o.order_id"
+    assert d["indirect_sources"] == ["p.dw.fact.order_id", "p.sales.orders.order_id"]
+
+
 def test_wide_tables_stay_fast():
     import time
     cols_ = {f"c{i}": "INT64" for i in range(200)}
@@ -449,7 +497,8 @@ def test_cli(tmp_path, capsys):
     rc = cli.main(["lineage", str(tmp_path / "q.sql"), "--schema", str(tmp_path / "s.json"),
                    "--project", "p", "--dataset", "sales"])
     out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["columns"] == {"<query>.name": ["p.sales.customers.name"]}
+    assert rc == 0 and out["columns"]["<query>.name"]["sources"] == ["p.sales.customers.name"]
+    assert out["columns"]["<query>.name"]["indirect_sources"] == ["p.sales.customers.customer_id", "p.sales.orders.cust_id"]
 
     (tmp_path / "bad.sql").write_text("SELECT FROM WHERE")
     assert cli.main(["validate", str(tmp_path / "bad.sql")]) == 1
@@ -500,7 +549,9 @@ def test_cli_table_and_column_filter(tmp_path, capsys):
     assert cli.main(base + ["--table", "dw.fact", "--columns", "total"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["tables"] == {"p.dw.fact": ["p.sales.orders"]}
-    assert out["columns"] == {"p.dw.fact.total": ["p.sales.orders.amount"]}
+    assert out["columns"] == {"p.dw.fact.total": {
+        "sources": ["p.sales.orders.amount"], "indirect_sources": [],
+        "steps": [{"column": "p.dw.fact.total", "expression": "orders.amount", "from": ["p.sales.orders"]}]}}
     assert cli.main(base + ["--columns", "order_id,customer_id", "--level", "column"]) == 0
     assert set(json.loads(capsys.readouterr().out)["columns"]) == {"p.dw.fact.order_id", "p.dw.other.customer_id"}
     with pytest.raises(SystemExit, match="Targets: p.dw.fact, p.dw.other"):

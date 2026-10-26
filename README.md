@@ -42,6 +42,28 @@ bqlineage lineage script.sql --schema schema.json   # offline: {"proj.ds.table":
 - `--raw` keeps temp tables and views as intermediate hops.
 - `--no-expand-views` treats views as sources.
 
+## Reading the column output
+
+Each target column shows where its values come from, what decides its rows, and how it was built, step by step:
+
+```json
+"p.dw.fact.total": {
+  "sources": ["p.sales.orders.amount"],
+  "indirect_sources": ["p.sales.customers.customer_id", "p.sales.customers.region", "p.sales.orders.cust_id", "p.sales.orders.status"],
+  "steps": [
+    {"column": "p.dw.fact.total", "expression": "SUM(big.gross)", "from": ["big", "p.sales.customers AS c"],
+     "joins": ["JOIN c ON big.cust_id = c.customer_id"], "where": "c.region = 'EU'", "group_by": ["c.region"]},
+    {"column": "big.gross", "in": "p.dw.fact", "expression": "paid.gross", "from": ["_SESSION.paid"], "where": "paid.gross > 100"},
+    {"column": "_SESSION.paid.gross", "expression": "o.amount * 1.2", "from": ["p.sales.orders AS o"], "where": "o.status = 'PAID'"}
+  ]
+}
+```
+
+- **`sources`** are the columns whose values flow into this column.
+- **`indirect_sources`** are the columns read by the JOIN / WHERE / GROUP BY / HAVING / QUALIFY conditions along the way, including subqueries such as `NOT IN (SELECT …)`. These decide which rows and groups exist.
+- **`steps`** run from the target back through CTEs (`"in"` names the statement), subqueries, temp tables and views. Each step has its expression and conditions. Names in step text are lower-cased, because BigQuery column names and aliases ignore case.
+- **An empty `sources` list** means the value doesn't come from a table column. The first step's expression shows what it is: a constant (`'ETL'`), a function (`CURRENT_TIMESTAMP()`) or a script variable (`@run_date`). If a column's source genuinely can't be found, you get a "Lineage stops at …" warning.
+
 ## Python
 
 ```python
@@ -49,6 +71,7 @@ from bqlineage import analyze, BigQuerySchemaProvider
 r = analyze(sql, BigQuerySchemaProvider("my-proj"), dataset="sales")
 r.table_lineage()                                   # {"proj.dw.fact": ["proj.sales.customers", ...]}
 r.column_lineage(table="dw.fact", columns=["total"])  # {"proj.dw.fact.total": ["proj.sales.orders.amount"]}
+r.column_details(table="dw.fact", columns=["total"])  # sources + indirect_sources + steps, as in the CLI output
 r.issues                                            # Issue(severity, message, statement, line, col)
 ```
 

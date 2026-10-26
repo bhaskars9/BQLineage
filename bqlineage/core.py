@@ -4,15 +4,17 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import sqlglot
 from sqlglot import exp
 from sqlglot.dialects.dialect import Dialect
 from sqlglot.errors import ParseError, SqlglotError
 from sqlglot.lineage import lineage as _sg_lineage
+from sqlglot.lineage import to_node as _to_node
 from sqlglot.optimizer.annotate_types import annotate_types
 from sqlglot.optimizer.qualify import qualify
-from sqlglot.optimizer.scope import build_scope
+from sqlglot.optimizer.scope import Scope, ScopeType, build_scope, find_all_in_scope
 from sqlglot.schema import MappingSchema
 from sqlglot.tokens import TokenType
 
@@ -61,7 +63,9 @@ class StatementLineage:
     kind: str  # SELECT, CREATE TABLE, CREATE TEMP TABLE, CREATE VIEW, INSERT, MERGE, UPDATE, EXPORT, VIEW
     target: str
     sources: set[str]  # every table read, including ones only used in JOIN/WHERE
-    columns: dict[str, set[str]]  # target column -> {"table.column", ...}
+    columns: dict[str, set[str]]  # target column -> {"table.column", ...} its values come from
+    # target column -> {"steps": [{expression, from, joins, where, ...}], "indirect": {"table.column", ...}}
+    details: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,16 +94,73 @@ class LineageResult:
 
     def column_lineage(self, resolve: bool = True, table: str | None = None,
                        columns: list[str] | None = None) -> dict[str, list[str]]:
-        """"table.column" -> source "table.column"s. resolve=True traces through temp tables and views.
-        table / columns: only these targets (columns match case-insensitively, with or without table)."""
-        graph: dict[str, set[str]] = {}
+        """"table.column" -> source "table.column"s its values come from. resolve=True traces through temp tables
+        and views. table / columns: only these targets (columns match case-insensitively, with or without table)."""
+        return {k: v["sources"] for k, v in self.column_details(resolve, table, columns).items()}
+
+    def column_details(self, resolve: bool = True, table: str | None = None,
+                       columns: list[str] | None = None) -> dict[str, dict]:
+        """Per target column (same filters as column_lineage):
+        sources          - columns its values come from
+        indirect_sources - columns the JOIN / WHERE / GROUP BY / HAVING / QUALIFY along the way read
+        steps            - how it was built: the expression and conditions at each step, from the target back
+                           through CTEs, subqueries, temp tables and views"""
+        direct: dict[str, set[str]] = {}
+        indirect: dict[str, set[str]] = {}
+        steps: dict[str, list[dict]] = {}
         for s in self.statements + self.views:
             for c, srcs in s.columns.items():
-                graph.setdefault(f"{s.target}.{c}", set()).update(srcs)
+                k = f"{s.target}.{c}"
+                direct.setdefault(k, set()).update(srcs)
+                info = s.details.get(c, {})
+                indirect.setdefault(k, set()).update(info.get("indirect", ()))
+                own = steps.setdefault(k, [])
+                for st in info.get("steps", ()):
+                    rest = {x: y for x, y in st.items() if x != "label"}
+                    st = {"column": k, **rest} if st["label"] is None else {"column": st["label"], "in": s.target, **rest}
+                    if st not in own:
+                        own.append(st)
+
+        def table_of(key):
+            return key.rsplit(".", 1)[0]
+
+        def traced(key):
+            return resolve and table_of(key) in self.intermediate and key in direct
+
+        memo: dict[str, tuple] = {}
+
+        def trace(key):  # (direct, indirect, steps), expanded through temp tables / views
+            if key in memo:
+                return memo[key]
+            memo[key] = (set(), set(), [])  # in progress: a self-referencing temp table adds nothing
+            d_out, i_out, s_out = set(), set(), list(steps.get(key, []))
+            for src in direct.get(key, ()):
+                if traced(src):
+                    d, i, s = trace(src)
+                    d_out |= d
+                    i_out |= i  # the conditions that built a temp column apply to what reads it
+                    s_out += [x for x in s if x not in s_out]
+                else:
+                    d_out.add(src)
+            for src in indirect.get(key, ()):
+                if traced(src):
+                    d, i, _ = trace(src)
+                    i_out |= d | i
+                else:
+                    i_out.add(src)
+            memo[key] = (d_out, i_out, s_out)
+            return memo[key]
+
         wanted = {c.lower() for c in columns} if columns else None
-        targets = {f"{s.target}.{c}" for s in self.statements for c in s.columns
-                   if _is_table(s.target, table) and (wanted is None or c.lower() in wanted)}
-        return self._collect(graph, targets, resolve, lambda k: k.rsplit(".", 1)[0])
+        out = {}
+        for s in self.statements:
+            if not _is_table(s.target, table) or (resolve and s.target in self.temp_tables):
+                continue
+            for c in s.columns:
+                if wanted is None or c.lower() in wanted:
+                    d, i, st = trace(f"{s.target}.{c}")
+                    out[f"{s.target}.{c}"] = {"sources": sorted(d), "indirect_sources": sorted(i), "steps": st}
+        return dict(sorted(out.items()))
 
     def _collect(self, graph, targets, resolve, table_of):
         def expand(key, seen):
@@ -120,7 +181,7 @@ class LineageResult:
     def to_dict(self, resolve: bool = True, table: str | None = None, columns: list[str] | None = None) -> dict:
         return {
             "tables": self.table_lineage(resolve, table),
-            "columns": self.column_lineage(resolve, table, columns),
+            "columns": self.column_details(resolve, table, columns),
             "issues": [str(i) for i in self.issues],
         }
 
@@ -354,9 +415,14 @@ class _Analyzer:
         else:
             name = self._v(self.fqn(target))
         columns: dict[str, set[str]] = {}
-        for n, srcs, _ in pairs:
+        details: dict[str, dict] = {}
+        for n, srcs, _, info in pairs:  # a MERGE can write one column from several WHEN branches
             columns.setdefault(n, set()).update(srcs)
-        (self.statements if sink is None else sink).append(StatementLineage(idx, kind, name, sources, columns))
+            d = details.setdefault(n, {"steps": [], "indirect": set()})
+            d["indirect"] |= info["indirect"]
+            d["steps"] += [st for st in info["steps"] if st not in d["steps"]]
+        sink = self.statements if sink is None else sink
+        sink.append(StatementLineage(idx, kind, name, sources, columns, details))
 
     def _normalize(self, stmt, idx, catalog) -> list[exp.Table]:
         """Fill in default project/dataset, map temp tables to _SESSION; return the real (non-CTE) tables."""
@@ -419,7 +485,11 @@ class _Analyzer:
             src = (clone or like).this
             cols = self._cols(src)
             self._put(target, cols)
-            return [(c, {f"{self._v(self.fqn(src))}.{c}"}, typ) for c, typ in cols.items()] if clone else None
+            if not clone:
+                return None
+            how = {"label": None, "expression": f"{'COPY' if clone.args.get('copy') else 'CLONE'} {self.fqn(src)}"}
+            return [(c, {f"{self._v(self.fqn(src))}.{c}"}, typ, {"steps": [how], "indirect": set()})
+                    for c, typ in cols.items()]
         declared = None
         if isinstance(stmt.this, exp.Schema):  # CREATE ... (a INT64, b STRING) [AS ...]
             declared = {c.name: c.args["kind"].sql(D) if c.args.get("kind") else "STRING" for c in stmt.this.expressions}
@@ -428,12 +498,12 @@ class _Analyzer:
             self._put(target, declared)
             return None
         pairs = self._columns(query, idx, list(declared) if declared else None, f"CREATE {self.fqn(target)}")
-        names = [n for n, _, _ in pairs]
+        names = [p[0] for p in pairs]
         dups = [n for n, c in Counter(names).items() if c > 1 and n != "*"]
         if dups:
             self.issue("error", f"Duplicate column names in `{self.fqn(target)}`: {', '.join(dups)}", idx)
         if declared or "*" not in names:  # an unexpanded * leaves the new table's columns unknown
-            self._put(target, declared or {n: t for n, _, t in pairs})
+            self._put(target, declared or {p[0]: p[2] for p in pairs})
         if stmt.kind == "VIEW" and self.expand_views:
             self.intermediate.add(self.fqn(target))
         return pairs
@@ -479,6 +549,8 @@ class _Analyzer:
                 self.issue("warning", f"{label}: target schema unknown; INSERT without column list not mapped{self._no_schema()}", idx)
                 continue
             q = base.copy().select(*(v.copy().as_(f"_c{i}") for i, v in enumerate(values)))
+            if when.args.get("condition"):  # WHEN MATCHED AND <condition>
+                q = q.where(when.args["condition"].copy())
             pairs += self._columns(q, idx, names, label)
         return pairs
 
@@ -488,6 +560,8 @@ class _Analyzer:
         frm = stmt.args.get("from_") or stmt.args.get("from")
         if frm:
             q = q.join(frm.this.copy(), join_type="cross")
+        if stmt.args.get("where"):
+            q = q.where(stmt.args["where"].this.copy())
         names = [self._canon(target, eq.this.name) for eq in stmt.expressions]
         return self._columns(q, idx, names, f"UPDATE {self.fqn(target)}")
 
@@ -497,13 +571,13 @@ class _Analyzer:
         pairs = self._query_lineage(query, idx)
         if target_cols is None or not pairs:
             return pairs
-        if any(n == "*" for n, _, _ in pairs):
+        if any(p[0] == "*" for p in pairs):
             self.issue("warning", f"{label}: columns behind SELECT * are unknown, can't map them to the target", idx)
             return []
         if len(target_cols) != len(pairs):
             self.issue("error", f"{label}: query returns {len(pairs)} columns but target has {len(target_cols)}", idx)
             return []
-        return [(tc, s, t) for tc, (_, s, t) in zip(target_cols, pairs)]
+        return [(tc, *rest) for tc, (_, *rest) in zip(target_cols, pairs)]
 
     def _qualify(self, query, mapping):
         """qualify(); names it can't resolve that are script variables (DECLARE / FOR) become values.
@@ -511,7 +585,9 @@ class _Analyzer:
         base = query.copy()
         while True:
             try:
-                return qualify(base.copy(), schema=mapping, dialect=D, validate_qualify_columns=True)
+                # quote_identifiers=False keeps the expressions shown in `steps` readable
+                return qualify(base.copy(), schema=mapping, dialect=D, validate_qualify_columns=True,
+                               quote_identifiers=False)
             except SqlglotError as e:
                 m = _UNRESOLVED.search(str(e))
                 name, table = (m[1].lower(), (m[2] or "").lower()) if m else ("", "")
@@ -523,7 +599,8 @@ class _Analyzer:
                 for c in hits:
                     c.replace(exp.Parameter(this=exp.Var(this=c.sql(D))))
 
-    def _query_lineage(self, query, idx) -> list[tuple[str, set[str], str]]:
+    def _query_lineage(self, query, idx) -> list[tuple[str, set[str], str, dict]]:
+        """Per output column: (name, source columns, type, {"steps": [...], "indirect": {...}})."""
         mapping = MappingSchema(self.schema, dialect=D)
         try:
             q = self._qualify(query, mapping)
@@ -539,18 +616,28 @@ class _Analyzer:
         # qualify lower-cases names; report them as written (aliases) or as in the schema (columns)
         case = {c.lower(): c for t in query.find_all(exp.Table) for c in self._cols(t)}
         case.update({s.alias_or_name.lower(): s.alias_or_name for s in query.selects if s.alias_or_name})
-        scope = build_scope(q)
+        root = build_scope(q)
+        scopes = {id(s.expression): s for s in root.traverse()}
+        top = {id(root.expression)}  # the statement's own SELECT, and each branch of a top-level UNION
+        stack = [root]
+        while stack:
+            s = stack.pop()
+            top.add(id(s.expression))
+            stack += s.set_operation_scopes if isinstance(s.expression, exp.SetOperation) else []
         # all columns in one pass share sqlglot's cache; trim_selects=False skips a deep copy of the
-        # whole SELECT per column per scope (quadratic on wide tables) - we only need the leaf tables
-        kw = dict(schema=None, dialect=D, scope=scope, copy=False, trim_selects=False)
+        # whole SELECT per column per scope (quadratic on wide tables), and keeps each node's own SELECT
+        kw = dict(schema=None, dialect=D, scope=root, copy=False, trim_selects=False)
         try:
             nodes = _sg_lineage(None, q, **kw)
         except Exception:  # one bad column fails the batch; redo column by column below
             nodes = {}
+        # conds: per SELECT, shared by every column passing through it; nodes: sqlglot's to_node cache
+        ctx = SimpleNamespace(scopes=scopes, mapping=mapping, conds={}, nodes={})
+        unresolved = set()
         out = []
         for sel in q.selects:
             name = sel.alias_or_name
-            srcs = set()
+            srcs, steps, indirect = set(), [], set()
             try:
                 node = nodes.get(name) or _sg_lineage(name, q, **kw)
             except Exception as e:  # sqlglot internals; keep the column's position, carry on
@@ -558,13 +645,89 @@ class _Analyzer:
             else:
                 for n in node.walk():
                     if isinstance(n.expression, exp.Table):
-                        col = self._canon(n.expression, n.name.split(".")[-1].strip('"'))
-                        srcs.add(f"{self._v(self.fqn(n.expression))}.{col}")
+                        srcs.add(self._col_key(n.expression, n.name))
+                    elif isinstance(n.expression, exp.Placeholder):
+                        unresolved.add(n.name)
+                    elif isinstance(n.source, exp.Select) and id(n.source) in scopes:
+                        s = scopes[id(n.source)]
+                        shape, why = self._conditions(s, ctx)
+                        expr = n.expression.this if isinstance(n.expression, exp.Alias) else n.expression
+                        label = n.name if not n.name.isdigit() else n.expression.alias_or_name  # UNION branch: index
+                        if id(n.source) in top:
+                            label = None  # the statement's target column
+                        elif s.scope_type == ScopeType.SUBQUERY:
+                            label = f"(subquery).{label}"
+                        step = {"label": label, "expression": expr.sql(D), **shape}
+                        if step not in steps:
+                            steps.append(step)
+                        indirect |= why
             if name == "*":
                 self.issue("warning", f"SELECT * not expanded: table schema unknown{self._no_schema()}", idx)
             typ = sel.type.sql(D) if sel.type and not sel.type.is_type(exp.DataType.Type.UNKNOWN) else "STRING"
-            out.append((case.get(name.lower(), name), srcs, typ))
+            out.append((case.get(name.lower(), name), srcs, typ, {"steps": steps, "indirect": indirect}))
+        if unresolved:
+            self.issue("warning", f"Lineage stops at {', '.join(sorted(unresolved))}: source not found", idx)
         return out
+
+    def _col_key(self, t: exp.Table, name: str) -> str:
+        """"table.column" for a column of table node `t` ("o.amount" -> "proj.ds.orders.amount")."""
+        return f"{self._v(self.fqn(t))}.{self._canon(t, name.split('.')[-1].strip(chr(34)))}"
+
+    def _conditions(self, scope: Scope, ctx) -> tuple[dict, set[str]]:
+        """What shapes the rows of one SELECT - its FROM, JOINs, WHERE, GROUP BY, HAVING, QUALIFY as SQL -
+        and the base columns those conditions read (including columns of subqueries inside them)."""
+        if id(scope.expression) in ctx.conds:
+            return ctx.conds[id(scope.expression)]
+        ctx.conds[id(scope.expression)] = ({}, set())  # in progress: a recursive CTE refers to itself
+        sel = scope.expression
+        shape = {"from": [self.fqn(s) + (f" AS {a}" if a != s.name else "") if isinstance(s, exp.Table) else a
+                          for a, (_, s) in scope.selected_sources.items()]}
+        parts = []
+        joins = []
+        for j in sel.args.get("joins") or []:
+            if j.args.get("on"):
+                kind = " ".join(x for x in (j.side, j.kind) if x)
+                joins.append(f"{kind + ' ' if kind else ''}JOIN {j.this.alias_or_name} ON {j.args['on'].sql(D)}")
+                parts.append(j.args["on"])
+        if joins:
+            shape["joins"] = joins
+        for key in ("where", "group", "having", "qualify"):
+            clause = sel.args.get(key)
+            if clause:
+                parts.append(clause)
+                if key == "group":
+                    shape["group_by"] = [g.sql(D) for g in clause.expressions] or [clause.sql(D)]
+                else:
+                    shape[key] = clause.this.sql(D)
+        if not shape["from"]:
+            del shape["from"]
+        indirect = set()
+        for part in parts:
+            for col in find_all_in_scope(part, exp.Column):
+                indirect |= self._resolve(col, scope, ctx)
+            for sub in part.find_all(exp.Select):  # e.g. WHERE id NOT IN (SELECT ...): all it reads counts
+                sub_scope = ctx.scopes.get(id(sub))
+                for col in sub_scope.columns if sub_scope else ():
+                    indirect |= self._resolve(col, sub_scope, ctx)
+        ctx.conds[id(scope.expression)] = (shape, indirect)
+        return shape, indirect
+
+    def _resolve(self, col: exp.Column, scope: Scope, ctx) -> set[str]:
+        """Base table columns behind a column reference, looking outward for correlated references."""
+        s = scope
+        while s is not None and col.table not in s.sources:
+            s = s.parent
+        src = s.sources[col.table] if s is not None else None
+        if isinstance(src, exp.Table):
+            return {self._col_key(src, col.name)}
+        if isinstance(src, Scope):  # a CTE / subquery column: its tables, plus the conditions that filtered it
+            try:
+                node = _to_node(col.name, src, D, ctx.mapping, trim_selects=False, _cache=ctx.nodes)
+            except Exception:
+                return set()
+            leaves = {self._col_key(n.expression, n.name) for n in node.walk() if isinstance(n.expression, exp.Table)}
+            return leaves | (self._conditions(src, ctx)[1] if isinstance(src.expression, exp.Select) else set())
+        return set()
 
     def _explain(self, msg, query) -> tuple[str, str]:
         """(severity, message) for a qualify failure. Unresolved names are errors only when every schema is known."""
