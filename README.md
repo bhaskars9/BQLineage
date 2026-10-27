@@ -1,5 +1,7 @@
 # bqlineage
 
+![Milo and Ember track down why the revenue dashboard shows zero: bqlineage shows revenue only counts orders with status 'PAID', which someone renamed overnight](docs/comic.webp)
+
 Table- and column-level lineage for BigQuery SQL, built on [sqlglot](https://github.com/tobymao/sqlglot)'s BigQuery parser. Give it a query or a whole script and it tells you:
 
 - which tables feed which
@@ -183,13 +185,13 @@ flowchart LR
 
 | What you export | File | Shapes | Arrows |
 |---|---|---|---|
-| Whole script, both pages | ~1 MB | 2,050 | 1,020 |
-| Whole script with `--raw` (temp hops) | ~1.9 MB | 4,100 | 2,550 |
-| `--table out0` | ~190 KB | 410 | 204 |
-| `--table out0 --columns a,b` | ~5 KB | 12 | 6 |
-| `--level table` | ~9 KB | 25 | 20 |
+| Whole script, both pages | ~62 KB | 2,050 | 1,020 |
+| Whole script with `--raw` (temp hops) | ~115 KB | 4,100 | 2,550 |
+| `--table out0` | ~13 KB | 410 | 204 |
+| `--table out0 --columns a,b` | ~2 KB | 12 | 6 |
+| `--level table` | ~1 KB | 25 | 20 |
 
-draw.io opens all of these. Past a few hundred columns the Columns page is too dense to read, so:
+Pages are saved compressed, the way draw.io itself saves them, so any version of the desktop app opens them. Rows keep the target table's column order, and source tables sit next to what they feed. Past a few hundred columns the Columns page is too dense to read, so:
 - use the Tables page for the overview
 - use `--table` / `--columns` for the columns you care about
 - in draw.io, *Arrange → Layout → Horizontal Flow* re-lays out a large diagram

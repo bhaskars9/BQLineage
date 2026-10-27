@@ -516,13 +516,15 @@ def test_drawio_export_of_the_example(tmp_path, capsys):
     import xml.etree.ElementTree as ET
     from pathlib import Path
 
-    from bqlineage.drawio import to_drawio
+    from bqlineage.drawio import read_page, to_drawio
 
     ex = Path(__file__).parent.parent / "examples"
     out = tmp_path / "orders.drawio"
     assert cli.main(["lineage", str(ex / "orders.sql"), "--schema", str(ex / "schema.json"), "--drawio", str(out)]) == 0
     capsys.readouterr()
-    pages = {d.get("name"): d for d in ET.parse(out).getroot().iter("diagram")}
+    diagrams = list(ET.parse(out).getroot().iter("diagram"))
+    assert all(d.text and not len(d) for d in diagrams)  # stored compressed, as draw.io saves pages
+    pages = {d.get("name"): read_page(d) for d in diagrams}
     assert list(pages) == ["Tables", "Columns"]
 
     def labels(page):
@@ -534,11 +536,22 @@ def test_drawio_export_of_the_example(tmp_path, capsys):
     revenue = next(u for u in pages["Columns"].iter("UserObject") if u.get("label") == "revenue")
     assert "SUM(p.gross)" in revenue.get("tooltip") and "o.status = 'PAID'" in revenue.get("tooltip")
     assert sum(c.get("edge") == "1" for c in pages["Columns"].iter("mxCell")) == 5  # one per source column
-    raw = ET.fromstring(to_drawio(analyze((ex / "orders.sql").read_text(), DictSchemaProvider.from_json(
+    def page(x):
+        return read_page(next(ET.fromstring(x).iter("diagram")))
+
+    raw = page(to_drawio(analyze((ex / "orders.sql").read_text(), DictSchemaProvider.from_json(
         str(ex / "schema.json"))), "column", resolve=False))
     assert "gross" in labels(raw)  # --raw keeps the temp table as a hop
-    plain = ET.fromstring(to_drawio(analyze("SELECT a.x FROM `p.d.a` a"), "table"))
+    plain = page(to_drawio(analyze("SELECT a.x FROM `p.d.a` a"), "table"))
     assert "<query>" in labels(plain)  # labels are plain text, not HTML
+    # control characters (illegal in XML) from pasted SQL can't break the file
+    odd = to_drawio(analyze("INSERT INTO `p.d.out` (k) SELECT CONCAT(a, '\x0c\x01') FROM `p.d.a`"), "column")
+    ET.fromstring(odd)
+    page(odd)
+    # rows keep the target's column order, not alphabetical
+    target = next(u for u in pages["Columns"].iter("mxCell") if u.get("value") == "shop.dw.customer_revenue")
+    rows = [u.get("label") for u in pages["Columns"].iter("UserObject") if u[0].get("parent") == target.get("id")]
+    assert rows == ["customer_id", "customer_name", "region", "revenue", "loaded_at"]
 
 
 def test_wide_tables_stay_fast():
