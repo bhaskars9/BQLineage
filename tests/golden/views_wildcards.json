@@ -1,0 +1,84 @@
+{
+  "tables": {
+    "<query#3>": [
+      "shop.crm.customers",
+      "shop.sales.orders"
+    ],
+    "shop.dw.daily_events": [
+      "shop.web.events_*"
+    ],
+    "shop.dw.eu_customers": [
+      "shop.crm.customers"
+    ]
+  },
+  "columns": {
+    "<query#3>.name": {
+      "sources": [
+        "shop.crm.customers.name"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment",
+        "shop.sales.orders.customer_id"
+      ]
+    },
+    "<query#3>.orders": {
+      "sources": [],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment",
+        "shop.sales.orders.customer_id"
+      ]
+    },
+    "shop.dw.daily_events.day": {
+      "sources": [
+        "shop.web.events_*._TABLE_SUFFIX"
+      ],
+      "indirect_sources": [
+        "shop.web.events_*._TABLE_SUFFIX",
+        "shop.web.events_*.event_name"
+      ]
+    },
+    "shop.dw.daily_events.event_name": {
+      "sources": [
+        "shop.web.events_*.event_name"
+      ],
+      "indirect_sources": [
+        "shop.web.events_*._TABLE_SUFFIX",
+        "shop.web.events_*.event_name"
+      ]
+    },
+    "shop.dw.daily_events.users": {
+      "sources": [
+        "shop.web.events_*.user_id"
+      ],
+      "indirect_sources": [
+        "shop.web.events_*._TABLE_SUFFIX",
+        "shop.web.events_*.event_name"
+      ]
+    },
+    "shop.dw.eu_customers.customer_id": {
+      "sources": [
+        "shop.crm.customers.customer_id"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment"
+      ]
+    },
+    "shop.dw.eu_customers.name": {
+      "sources": [
+        "shop.crm.customers.name"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment"
+      ]
+    }
+  },
+  "issues": []
+}

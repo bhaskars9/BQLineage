@@ -1,0 +1,42 @@
+{
+  "tables": {
+    "shop.dw.order_items": [
+      "shop.sales.orders"
+    ]
+  },
+  "columns": {
+    "shop.dw.order_items.line_total": {
+      "sources": [
+        "shop.sales.orders.items"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.items"
+      ]
+    },
+    "shop.dw.order_items.order_id": {
+      "sources": [
+        "shop.sales.orders.order_id"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.items"
+      ]
+    },
+    "shop.dw.order_items.qty": {
+      "sources": [
+        "shop.sales.orders.items"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.items"
+      ]
+    },
+    "shop.dw.order_items.sku": {
+      "sources": [
+        "shop.sales.orders.items"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.items"
+      ]
+    }
+  },
+  "issues": []
+}

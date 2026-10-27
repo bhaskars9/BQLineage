@@ -1,7 +1,10 @@
-from .core import Issue, LineageError, LineageResult, StatementLineage, analyze, validate
-from .schema import BigQuerySchemaProvider, DictSchemaProvider, TableInfo
+from .analyzer import analyze, validate
+from .model import Issue, LineageError, StatementLineage
+from .result import LineageResult
+from .catalog import BigQuerySchemaProvider, Catalog, DictSchemaProvider, TableInfo
+from . import config, scan
 
 __all__ = [
     "analyze", "validate", "Issue", "LineageError", "LineageResult", "StatementLineage",
-    "BigQuerySchemaProvider", "DictSchemaProvider", "TableInfo",
+    "BigQuerySchemaProvider", "Catalog", "DictSchemaProvider", "TableInfo",
 ]

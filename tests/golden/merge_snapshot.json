@@ -1,0 +1,84 @@
+{
+  "tables": {
+    "shop.dw.customer_snapshot": [
+      "shop.crm.customers",
+      "shop.sales.orders"
+    ]
+  },
+  "columns": {
+    "shop.dw.customer_snapshot.customer_id": {
+      "sources": [
+        "shop.crm.customers.customer_id"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment",
+        "shop.dw.customer_snapshot.customer_id",
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.status"
+      ]
+    },
+    "shop.dw.customer_snapshot.lifetime_value": {
+      "sources": [
+        "shop.sales.orders.amount"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment",
+        "shop.dw.customer_snapshot.customer_id",
+        "shop.dw.customer_snapshot.lifetime_value",
+        "shop.sales.orders.amount",
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.status"
+      ]
+    },
+    "shop.dw.customer_snapshot.name": {
+      "sources": [
+        "shop.crm.customers.name"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment",
+        "shop.dw.customer_snapshot.customer_id",
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.status"
+      ]
+    },
+    "shop.dw.customer_snapshot.region": {
+      "sources": [
+        "shop.crm.customers.region"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment",
+        "shop.dw.customer_snapshot.customer_id",
+        "shop.dw.customer_snapshot.region",
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.status"
+      ]
+    },
+    "shop.dw.customer_snapshot.updated_at": {
+      "sources": [],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.crm.customers.segment",
+        "shop.dw.customer_snapshot.customer_id",
+        "shop.dw.customer_snapshot.lifetime_value",
+        "shop.sales.orders.amount",
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.status"
+      ]
+    }
+  },
+  "issues": []
+}

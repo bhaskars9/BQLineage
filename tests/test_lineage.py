@@ -1,35 +1,8 @@
-import json
-from datetime import datetime
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
+"""Analysis: tables, columns, statements, scripting - one script at a time."""
 import pytest
-from google.api_core.exceptions import Forbidden, NotFound
+from conftest import COPY_CHAIN, cols
 
-from bqlineage import BigQuerySchemaProvider, DictSchemaProvider, LineageError, analyze, validate
-from bqlineage import cli
-
-TABLES = {
-    "p.sales.orders": {"order_id": "INT64", "cust_id": "INT64", "amount": "FLOAT64", "order_ts": "TIMESTAMP",
-                       "items": "ARRAY<STRUCT<sku STRING, qty INT64>>"},
-    "p.sales.customers": {"customer_id": "INT64", "name": "STRING", "region": "STRING",
-                          "address": "STRUCT<city STRING, zip STRING>"},
-    "p.hr.employees": {"emp_id": "INT64", "manager_id": "INT64", "emp_name": "STRING"},
-    "p.dw.fact": {"order_id": "INT64", "customer_name": "STRING", "total": "FLOAT64"},
-    "p.sales.big_orders": {"columns": {"order_id": "INT64", "amount": "FLOAT64"},
-                           "view_sql": "SELECT order_id, amount FROM sales.orders WHERE amount > 100"},
-}
-
-
-@pytest.fixture
-def schema():
-    return DictSchemaProvider(TABLES, project="p")
-
-
-def cols(sql, schema, **kw):
-    r = analyze(sql, schema, **kw)
-    assert r.ok, r.issues
-    return r.column_lineage()
+from bqlineage import DictSchemaProvider, LineageError, analyze, validate
 
 
 def test_unaliased_join_columns_resolved_from_schema(schema):
@@ -226,8 +199,10 @@ def test_no_schema_source_is_named_in_errors():
     assert all("no schema source given" in i.message for i in r.issues) and len(r.issues) == 2
 
 
-def test_dynamic_sql_and_calls_warn():
-    r = analyze("EXECUTE IMMEDIATE 'SELECT 1';\nCALL ds.proc();\nSELECT 1 AS one")
+def test_run_time_dynamic_sql_and_calls_warn():
+    # SQL read from a table is only known when the script runs (literal SQL is analyzed: see test_variables.py)
+    r = analyze("DECLARE q STRING;\nSET q = (SELECT MAX(text) FROM `p.d.queries`);\nEXECUTE IMMEDIATE q;\n"
+                "CALL ds.proc();\nSELECT 1 AS one")
     assert r.ok and [i.message.split()[0] for i in r.issues] == ["EXECUTE", "CALL"]
 
 
@@ -443,6 +418,8 @@ USING_TABLES = {
     "p.d.t3": {"k1": "INT64", "k2": "STRING", "c": "INT64"},
     "p.d.out": {"k1": "INT64", "k2": "STRING", "k3": "DATE", "a": "FLOAT64", "c": "INT64"},
 }
+
+
 USING_CTES = """
 WITH cte1 AS (SELECT * FROM `p.d.t1` WHERE a > 0),
      cte2 AS (SELECT * FROM `p.d.t2`),
@@ -512,46 +489,21 @@ def test_missing_schema_keeps_lineage_of_the_other_columns():
     assert all("Cannot automatically join" not in i.message for i in r.issues), r.issues
 
 
-def test_drawio_export_of_the_example(tmp_path, capsys):
-    import xml.etree.ElementTree as ET
-    from pathlib import Path
-
-    from bqlineage.drawio import read_page, to_drawio
-
-    ex = Path(__file__).parent.parent / "examples"
-    out = tmp_path / "orders.drawio"
-    assert cli.main(["lineage", str(ex / "orders.sql"), "--schema", str(ex / "schema.json"), "--drawio", str(out)]) == 0
-    capsys.readouterr()
-    diagrams = list(ET.parse(out).getroot().iter("diagram"))
-    assert all(d.text and not len(d) for d in diagrams)  # stored compressed, as draw.io saves pages
-    pages = {d.get("name"): read_page(d) for d in diagrams}
-    assert list(pages) == ["Tables", "Columns"]
-
-    def labels(page):
-        return {c.get("value") or c.get("label") for c in page.iter() if c.tag in ("mxCell", "UserObject")} - {None}
-
-    assert {"shop.sales.orders", "shop.crm.customers", "shop.dw.customer_revenue"} <= labels(pages["Tables"])
-    assert sum(c.get("edge") == "1" for c in pages["Tables"].iter("mxCell")) == 2
-    assert {"amount", "gross", "revenue", "loaded_at"} - labels(pages["Columns"]) == {"gross"}  # temp hidden
-    revenue = next(u for u in pages["Columns"].iter("UserObject") if u.get("label") == "revenue")
-    assert "SUM(p.gross)" in revenue.get("tooltip") and "o.status = 'PAID'" in revenue.get("tooltip")
-    assert sum(c.get("edge") == "1" for c in pages["Columns"].iter("mxCell")) == 5  # one per source column
-    def page(x):
-        return read_page(next(ET.fromstring(x).iter("diagram")))
-
-    raw = page(to_drawio(analyze((ex / "orders.sql").read_text(), DictSchemaProvider.from_json(
-        str(ex / "schema.json"))), "column", resolve=False))
-    assert "gross" in labels(raw)  # --raw keeps the temp table as a hop
-    plain = page(to_drawio(analyze("SELECT a.x FROM `p.d.a` a"), "table"))
-    assert "<query>" in labels(plain)  # labels are plain text, not HTML
-    # control characters (illegal in XML) from pasted SQL can't break the file
-    odd = to_drawio(analyze("INSERT INTO `p.d.out` (k) SELECT CONCAT(a, '\x0c\x01') FROM `p.d.a`"), "column")
-    ET.fromstring(odd)
-    page(odd)
-    # rows keep the target's column order, not alphabetical
-    target = next(u for u in pages["Columns"].iter("mxCell") if u.get("value") == "shop.dw.customer_revenue")
-    rows = [u.get("label") for u in pages["Columns"].iter("UserObject") if u[0].get("parent") == target.get("id")]
-    assert rows == ["customer_id", "customer_name", "region", "revenue", "loaded_at"]
+def test_one_to_one_hops_are_compacted(schema):
+    r = analyze(COPY_CHAIN, schema)
+    assert r.ok, r.issues
+    total = r.column_details()["p.dw.fact.total"]
+    # the target's own step and the step that does work stay; copies through c1 and the temp table go
+    assert [(s["column"], s["expression"]) for s in total["steps"]] == [
+        ("p.dw.fact.total", "c2.amt"), ("c2.amt", "c1.amount * 2")]
+    assert total["sources"] == ["p.sales.orders.amount"]
+    # a copy that filters is not one-to-one in rows: it stays
+    assert [s["column"] for s in r.column_details()["p.dw.fact.order_id"]["steps"]] == [
+        "p.dw.fact.order_id", "c2.order_id"]
+    # raw keeps every hop
+    raw = r.column_details(resolve=False)["p.dw.fact.total"]["steps"]
+    assert [s["column"] for s in raw] == ["p.dw.fact.total", "c2.amt", "c1.amount"]
+    assert r.column_details(resolve=False)["_SESSION.stage.amount"]["steps"][0]["expression"] == "orders.amount"
 
 
 def test_wide_tables_stay_fast():
@@ -565,124 +517,16 @@ def test_wide_tables_stay_fast():
     assert time.time() - t0 < 5  # was quadratic (~20s+) when sqlglot trimmed selects per column
 
 
-# ---- BigQuery provider with a mocked client (no BigQuery access needed) -----------------------
-
-def field(name, ftype, mode="NULLABLE", fields=()):
-    return SimpleNamespace(name=name, field_type=ftype, mode=mode, fields=list(fields))
-
-
-def mock_client():
-    tables = {
-        "p.sales.orders": SimpleNamespace(table_type="TABLE", view_query=None, schema=[
-            field("order_id", "INTEGER"), field("amount", "FLOAT"),
-            field("items", "RECORD", "REPEATED", [field("sku", "STRING"), field("qty", "INTEGER")])]),
-        "p.sales.v": SimpleNamespace(table_type="VIEW", view_query="SELECT order_id AS oid FROM `p.sales.orders`",
-                                     schema=[field("oid", "INTEGER")]),
-    }
-    client = MagicMock(project="p")
-
-    def get_table(fqn):
-        if fqn not in tables:
-            raise NotFound(fqn)
-        return tables[fqn]
-
-    client.get_table.side_effect = get_table
-    return client
-
-
-def test_bigquery_provider_types_views_and_not_found():
-    prov = BigQuerySchemaProvider(client=mock_client())
-    info = prov.get_table("p.sales.orders")
-    assert info.columns == {"order_id": "INT64", "amount": "FLOAT64",
-                            "items": "ARRAY<STRUCT<`sku` STRING, `qty` INT64>>"}
-    assert prov.get_table("p.sales.v").view_sql.startswith("SELECT")
-    assert prov.get_table("p.sales.nope") is None
-
-
-def test_lineage_with_bigquery_provider_fetches_each_table_once():
-    client = mock_client()
-    r = analyze("SELECT oid FROM sales.v; SELECT it.qty FROM sales.orders, UNNEST(items) it; SELECT oid AS x FROM sales.v",
-                BigQuerySchemaProvider(client=client))
-    assert r.ok, r.issues
-    assert r.column_lineage()["<query#1>.oid"] == ["p.sales.orders.order_id"]
-    assert r.column_lineage()["<query#2>.qty"] == ["p.sales.orders.items"]
-    assert client.get_table.call_count == 2
-
-
-def test_cli(tmp_path, capsys):
-    (tmp_path / "s.json").write_text(json.dumps(TABLES))
-    (tmp_path / "q.sql").write_text("SELECT name FROM sales.customers JOIN sales.orders ON cust_id = customer_id")
-    rc = cli.main(["lineage", str(tmp_path / "q.sql"), "--schema", str(tmp_path / "s.json"),
-                   "--project", "p", "--dataset", "sales"])
-    out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["columns"]["<query>.name"]["sources"] == ["p.sales.customers.name"]
-    assert out["columns"]["<query>.name"]["indirect_sources"] == ["p.sales.customers.customer_id", "p.sales.orders.cust_id"]
-
-    (tmp_path / "bad.sql").write_text("SELECT FROM WHERE")
-    assert cli.main(["validate", str(tmp_path / "bad.sql")]) == 1
-
-    with patch("bqlineage.cli.BigQuerySchemaProvider", lambda project: BigQuerySchemaProvider(client=mock_client())):
-        rc = cli.main(["lineage", str(tmp_path / "q.sql"), "--bq", "--level", "table"])
-    assert rc == 1  # customers isn't in the mocked BigQuery -> reported, not guessed
-    assert "not found" in capsys.readouterr().out
-
-
-def test_permission_denied_is_reported_not_raised():
-    client = mock_client()
-    original = client.get_table.side_effect
-
-    def get_table(fqn):
-        if "secret" in str(fqn):
-            raise Forbidden("Access Denied: Table p:secret.t")
-        return original(fqn)
-
-    client.get_table.side_effect = get_table
-    r = analyze("SELECT o.order_id, s.x FROM sales.orders o JOIN secret.t s ON TRUE", BigQuerySchemaProvider(client=client))
-    assert r.issues[0].severity == "error" and "Access Denied" in r.issues[0].message
-    assert r.column_lineage() == {"<query>.order_id": ["p.sales.orders.order_id"], "<query>.x": ["p.secret.t.x"]}
-
-
-def test_wildcard_table_uses_newest_shard_schema():
-    client = mock_client()
-    client.list_tables.return_value = [
-        SimpleNamespace(table_id="events_20240101", created=datetime(2024, 1, 2), reference="p.sales.events_20240101"),
-        SimpleNamespace(table_id="events_20240102", created=datetime(2024, 1, 3), reference="p.sales.events_20240102"),
-        SimpleNamespace(table_id="orders", created=datetime(2025, 1, 1), reference="p.sales.orders"),
-    ]
-    shard = SimpleNamespace(table_type="TABLE", view_query=None, schema=[field("event_name", "STRING")])
-    original = client.get_table.side_effect
-    client.get_table.side_effect = lambda ref: shard if ref == "p.sales.events_20240102" else original(ref)
-    r = analyze("SELECT event_name, _TABLE_SUFFIX AS sfx FROM `p.sales.events_*` WHERE _TABLE_SUFFIX > '2024'",
-                BigQuerySchemaProvider(client=client))
-    assert r.ok, r.issues
-    assert r.column_lineage() == {"<query>.event_name": ["p.sales.events_*.event_name"],
-                                  "<query>.sfx": ["p.sales.events_*._TABLE_SUFFIX"]}
-
-
-def test_cli_table_and_column_filter(tmp_path, capsys):
-    (tmp_path / "s.json").write_text(json.dumps(TABLES))
-    (tmp_path / "q.sql").write_text("INSERT INTO dw.fact (order_id, total) SELECT order_id, amount FROM sales.orders;\n"
-                                    "CREATE TABLE dw.other AS SELECT customer_id FROM sales.customers;")
-    base = ["lineage", str(tmp_path / "q.sql"), "--schema", str(tmp_path / "s.json"), "--project", "p"]
-    assert cli.main(base + ["--table", "dw.fact", "--columns", "total"]) == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["tables"] == {"p.dw.fact": ["p.sales.orders"]}
-    assert out["columns"] == {"p.dw.fact.total": {
-        "sources": ["p.sales.orders.amount"], "indirect_sources": [],
-        "steps": [{"column": "p.dw.fact.total", "expression": "orders.amount", "from": ["p.sales.orders"]}]}}
-    assert cli.main(base + ["--columns", "order_id,customer_id", "--level", "column"]) == 0
-    assert set(json.loads(capsys.readouterr().out)["columns"]) == {"p.dw.fact.order_id", "p.dw.other.customer_id"}
-    with pytest.raises(SystemExit, match="Targets: p.dw.fact, p.dw.other"):
-        cli.main(base + ["--table", "nope"])
-    with pytest.raises(SystemExit, match="None of the columns"):
-        cli.main(base + ["--table", "fact", "--columns", "nope"])
-
-
-def test_cli_bq_without_credentials_exits_cleanly(tmp_path):
-    (tmp_path / "q.sql").write_text("SELECT 1")
-
-    def no_credentials(project):
-        raise RuntimeError("Your default credentials were not found")
-
-    with patch("bqlineage.cli.BigQuerySchemaProvider", no_credentials), pytest.raises(SystemExit, match="bqlineage auth"):
-        cli.main(["lineage", str(tmp_path / "q.sql"), "--bq"])
+def test_procedure_body_is_analyzed_with_its_parameters_as_values(schema):
+    sql = """
+    CREATE OR REPLACE PROCEDURE dw.load_fact(IN min_amount FLOAT64, OUT loaded STRUCT<n INT64, at TIMESTAMP>)
+    OPTIONS (description = 'nightly')
+    BEGIN
+      INSERT INTO dw.fact (order_id, total) SELECT order_id, amount FROM sales.orders WHERE amount > min_amount;
+      SET loaded = (SELECT AS STRUCT 1, CURRENT_TIMESTAMP());
+    END;
+    """
+    r = analyze(sql, schema)
+    assert r.ok and not r.issues, r.issues  # min_amount is a parameter, not an unknown column
+    assert r.column_lineage() == {"p.dw.fact.order_id": ["p.sales.orders.order_id"],
+                                  "p.dw.fact.total": ["p.sales.orders.amount"]}

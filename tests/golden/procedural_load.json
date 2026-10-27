@@ -1,0 +1,41 @@
+{
+  "tables": {
+    "<query#7>": [],
+    "shop.dw.net_revenue": [
+      "shop.sales.orders",
+      "shop.sales.refunds"
+    ]
+  },
+  "columns": {
+    "<query#7>.failure": {
+      "sources": [],
+      "indirect_sources": []
+    },
+    "shop.dw.net_revenue.customer_id": {
+      "sources": [
+        "shop.sales.orders.customer_id"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.status",
+        "shop.sales.refunds.order_id",
+        "shop.sales.refunds.refund_amount"
+      ]
+    },
+    "shop.dw.net_revenue.net": {
+      "sources": [
+        "shop.sales.orders.amount",
+        "shop.sales.refunds.refund_amount"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.status",
+        "shop.sales.refunds.order_id",
+        "shop.sales.refunds.refund_amount"
+      ]
+    }
+  },
+  "issues": []
+}

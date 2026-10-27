@@ -1,0 +1,38 @@
+{
+  "tables": {
+    "shop.dw.net_revenue": [
+      "shop.crm.customers",
+      "shop.sales.orders",
+      "shop.sales.refunds"
+    ]
+  },
+  "columns": {
+    "shop.dw.net_revenue.customer_id": {
+      "sources": [
+        "shop.crm.customers.customer_id",
+        "shop.sales.orders.customer_id"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.status",
+        "shop.sales.refunds.order_id"
+      ]
+    },
+    "shop.dw.net_revenue.net": {
+      "sources": [
+        "shop.sales.orders.amount",
+        "shop.sales.refunds.refund_amount"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.status",
+        "shop.sales.refunds.order_id"
+      ]
+    }
+  },
+  "issues": []
+}
