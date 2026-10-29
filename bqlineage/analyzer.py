@@ -288,10 +288,16 @@ class _Analyzer(Tracer):
         details: dict[str, dict] = {}
         for rec in records:  # a MERGE can write one column from several WHEN branches
             columns.setdefault(rec.name, set()).update(rec.sources)
-            d = details.setdefault(rec.name, {"steps": [], "indirect": set(), "unresolved": set()})
+            d = details.setdefault(rec.name, {"steps": [], "indirect": set(), "unresolved": set(), "flow": {}})
             d["indirect"] |= rec.indirect
             d["unresolved"] |= rec.unresolved
             d["steps"] += [st for st in rec.steps if st not in d["steps"]]
+            for node, f in rec.flow.items():
+                g = d["flow"].setdefault(node, {"inputs": set(), "steps": [], "same": True, "filters": set()})
+                g["inputs"] |= f["inputs"]
+                g["steps"] += [st for st in f["steps"] if st not in g["steps"]]
+                g["same"] = g["same"] and f["same"]
+                g["filters"] |= f["filters"]
         sink = self.statements if sink is None else sink
         sink.append(StatementLineage(idx, kind, name, sources, columns, details))
 

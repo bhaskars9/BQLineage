@@ -96,9 +96,11 @@ class Tracer:
             except Exception as e:  # sqlglot internals; keep the column's position, carry on
                 self.issue("warning", f"Column lineage failed for `{name}`: {e}", idx)
             else:
+                keys = {}  # id(lineage node) -> its node in rec.flow
                 for n in node.walk():
                     if isinstance(n.expression, exp.Table):
                         rec.sources.add(self._col_key(n.expression, n.name))
+                        keys[id(n)] = ("table", *self._col_key(n.expression, n.name).rsplit(".", 1))
                     elif isinstance(n.expression, exp.Placeholder):
                         rec.unresolved.add(n.name)
                     elif isinstance(n.source, exp.Select) and id(n.source) in scopes:
@@ -106,18 +108,40 @@ class Tracer:
                         shape, why = self._conditions(s, ctx)
                         expr = n.expression.this if isinstance(n.expression, exp.Alias) else n.expression
                         label = n.name if not n.name.isdigit() else n.expression.alias_or_name  # UNION branch: index
+                        col = label.split(".")[-1]
                         if id(n.source) in top:
-                            label = None  # the statement's target column
+                            label, key = None, OUT  # the statement's target column
                         elif s.scope_type == ScopeType.SUBQUERY:
                             label = f"(subquery).{label}"
+                            key = ("subquery", s.expression.parent.alias_or_name, col)
                         elif isinstance(s.expression.parent, exp.CTE):  # "c.x" -> "eu_customers.x"
-                            label = f"{s.expression.parent.alias}.{label.split('.')[-1]}"
+                            label = f"{s.expression.parent.alias}.{col}"
+                            key = ("cte", s.expression.parent.alias, col)
+                        else:  # a UNION branch: a column of the CTE / subquery around the UNION
+                            p, first = s.expression.parent, s.expression.parent
+                            while isinstance(p, exp.SetOperation):
+                                p = p.parent
+                            while isinstance(first, exp.SetOperation):
+                                first = first.this
+                            if isinstance(first, exp.Select) and n.name.isdigit() and int(n.name) < len(first.selects):
+                                col = first.selects[int(n.name)].alias_or_name  # as the first branch names it
+                            key = ("cte", p.alias, col) if isinstance(p, exp.CTE) else ("subquery", p.alias_or_name if p else "", col)
+                            label = f"{p.alias}.{col}" if isinstance(p, exp.CTE) else f"(subquery).{col}"
                         step = {"label": label, "expression": expr.sql(D), **shape}
                         if isinstance(expr, exp.Column) and not shape.keys() - {"from"}:
                             step["same"] = True  # one-to-one copy, nothing filtered or joined: compactable
                         if step not in rec.steps:
                             rec.steps.append(step)
                         rec.indirect |= why
+                        keys[id(n)] = key
+                        f = rec.flow.setdefault(key, {"inputs": set(), "steps": [], "same": True, "filters": set()})
+                        plain = {k: v for k, v in step.items() if k not in ("label", "same")}
+                        if plain not in f["steps"]:
+                            f["steps"].append(plain)
+                        # a diagram can skip a copy, but not a UNION: that's where inputs come together
+                        f["same"] = f["same"] and "same" in step and s.scope_type != ScopeType.SET_OPERATION
+                        f["filters"] |= {c.rsplit(".", 1)[0] for c in why}  # tables its conditions read
+                _link(node, None, keys, rec.flow, set())
             if name == "*":
                 self.issue("warning", f"SELECT * not expanded: table schema unknown{self._no_schema()}", idx)
             if sel.type and not sel.type.is_type(exp.DataType.Type.UNKNOWN):
@@ -248,3 +272,21 @@ class Tracer:
         if not hits:
             return "error", f"Column `{name}` not found in {', '.join(what for what, _ in here) or 'this query'}"
         return "warning", f"Column `{name}` could not be resolved{hint}"
+
+
+OUT = ("out", "", "")  # in ColumnRecord.flow: the record's own column
+
+
+def _link(n, parent, keys, flow, seen):
+    """Fill flow[x]["inputs"] from sqlglot's lineage tree; nodes without a key (placeholders ...) pass through."""
+    key = keys.get(id(n))
+    if key is None:
+        for child in n.downstream:
+            _link(child, parent, keys, flow, seen)
+        return
+    if parent is not None and key != parent:  # a recursive CTE reads itself
+        flow[parent]["inputs"].add(key)
+    if key[0] != "table" and (id(n), parent) not in seen:
+        seen.add((id(n), parent))
+        for child in n.downstream:
+            _link(child, key, keys, flow, seen)

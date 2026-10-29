@@ -35,6 +35,10 @@ class ColumnRecord:
     steps: list[dict] = field(default_factory=list)  # {"label", "expression", "from", "joins", "where", ...}
     indirect: set[str] = field(default_factory=set)  # columns the conditions along the way read
     unresolved: set[str] = field(default_factory=set)  # references whose source couldn't be found
+    # the graph behind `sources`, for diagrams. node -> {"inputs": {node, ...}, "steps": [...], "same": bool,
+    # "filters": {tables its JOIN / WHERE / ... read}}. A node is ("table", table, column),
+    # ("cte" | "subquery", name, column), or ("out", "", "") for this column
+    flow: dict[tuple, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -44,5 +48,5 @@ class StatementLineage:
     target: str
     sources: set[str]  # every table read, including ones only used in JOIN/WHERE
     columns: dict[str, set[str]]  # target column -> {"table.column", ...} its values come from
-    # target column -> {"steps": [...], "indirect": {"table.column", ...}, "unresolved": {...}}
+    # target column -> {"steps": [...], "indirect": {"table.column", ...}, "unresolved": {...}, "flow": {...}}
     details: dict[str, dict] = field(default_factory=dict)

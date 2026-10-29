@@ -8,11 +8,29 @@ bqlineage lineage etl.sql --drawio lineage.drawio
 
 The file opens in the [draw.io](https://www.drawio.com) desktop app, at [diagrams.net](https://app.diagrams.net), or in the VS Code draw.io extension. Pages are saved compressed, the way draw.io itself saves them. It has two pages; `--level` picks one or both:
 
-- **Tables:** tables flow left to right, from sources to targets.
-  - Sources are blue and targets green.
-  - Temp tables and views are grey dashed (with `--raw`).
-- **Columns:** each table lists only the columns in the lineage, in the target table's column order, with arrows from source column to target column. Source tables sit next to what they feed, so arrows run mostly straight.
-  - **Hover a target column** to see how it was built: each step's expression with its JOIN / WHERE / GROUP BY, and the columns that decide its rows.
+- **Tables:** boxes flow left to right, from source tables through every intermediate step to the targets.
+- **Columns:** each box lists only the columns in the lineage, with an arrow for every hop a value takes.
+
+On both pages a source table sits just left of the first step that reads it, and boxes are stacked next to what they feed, so arrows run short and mostly straight.
+
+### Intermediate steps
+
+Each kind of step has its own style, with a legend at the top of each page:
+
+| Box | Style | Hover shows |
+|---|---|---|
+| Source table | blue | |
+| View (expanded from the catalog) | purple, dashed | each column's expression and `WHERE` |
+| Temp table | grey, dashed | each column's expression and `WHERE` |
+| CTE | yellow | the statement it belongs to; each column's step |
+| Subquery (`FROM (SELECT …) s`) | orange, dotted | the statement it belongs to; each column's step |
+| Target | green | each column's whole story: every step's expression with its JOIN / WHERE / GROUP BY, and the columns that decide its rows |
+
+- **CTEs that only copy a column** (`c AS (SELECT * FROM t)`, no filter, join or expression) are left out, and the arrow goes straight past them. `--raw` draws them too.
+- **Temp tables and views always show,** because they are steps the script wrote.
+- **A `UNION` is always a step:** both branches feed the same box, and hovering a column shows one line per branch.
+- **A table that only filters** (a `JOIN … ON` or `WHERE x IN (SELECT …)`) points at the step that reads it.
+- **A CTE name used in two statements** gives two boxes; hover one to see which statement it belongs to.
 
 The Columns page for the [worked example](output.md#a-worked-example) (file: [`examples/orders.drawio`](../examples/orders.drawio)):
 
@@ -27,6 +45,15 @@ flowchart LR
         c_name["name"]
         c_region["region"]
     end
+    subgraph paid["_SESSION.paid_orders (temp table)"]
+        p_cid["customer_id"]
+        p_gross["gross"]
+    end
+    subgraph eu["eu_customers (CTE)"]
+        e_cid["customer_id"]
+        e_name["name"]
+        e_region["region"]
+    end
     subgraph revenue["shop.dw.customer_revenue"]
         r_cid["customer_id"]
         r_name["customer_name"]
@@ -34,24 +61,38 @@ flowchart LR
         r_revenue["revenue"]
         r_loaded["loaded_at"]
     end
-    o_amount -- "SUM(amount * 1.2)" --> r_revenue
-    o_cid --> r_cid
-    c_cid --> r_cid
-    c_name --> r_name
-    c_region --> r_region
+    o_amount -- "amount * 1.2" --> p_gross
+    o_cid --> p_cid
+    c_cid --> e_cid
+    c_name --> e_name
+    c_region --> e_region
+    p_gross -- "SUM(gross)" --> r_revenue
+    p_cid --> r_cid
+    e_cid --> r_cid
+    e_name --> r_name
+    e_region --> r_region
+    classDef source fill:#dae8fc,stroke:#6c8ebf,color:#000
+    classDef temp fill:#f5f5f5,stroke:#666666,stroke-dasharray:5 5,color:#000
+    classDef cte fill:#fff2cc,stroke:#d6b656,color:#000
+    classDef target fill:#d5e8d4,stroke:#82b366,color:#000
+    class orders,customers source
+    class paid temp
+    class eu cte
+    class revenue target
 ```
+
+Hovering `gross` in the temp table shows `gross = o.amount * 1.2`, `WHERE: o.status = 'PAID' AND …`. Hovering `revenue` shows that, plus the `SUM`, the JOIN and the GROUP BY that follow.
 
 ### Size
 
-The Tables page stays small. The Columns page grows with the number of columns. For example, a script with 20 source tables, 10 temp tables and 5 targets of 200 columns each (1,000 target columns) gives:
+The Tables page stays small. The Columns page grows with the number of columns. For example, a script with 20 source tables, 10 temp tables and 5 targets of 200 columns each (1,000 target columns, each target built through a CTE) gives:
 
 | What you export | File | Shapes | Arrows |
 |---|---|---|---|
-| Whole script, both pages | ~62 KB | 2,050 | 1,020 |
-| Whole script with `--raw` (temp hops) | ~115 KB | 4,100 | 2,550 |
-| `--table out0` | ~13 KB | 410 | 204 |
-| `--table out0 --columns a,b` | ~2 KB | 12 | 6 |
-| `--level table` | ~1 KB | 25 | 20 |
+| Whole script, both pages | ~141 KB | 4,090 | 3,035 |
+| `--table out0` | ~31 KB | 824 | 607 |
+| `--table out0 --columns c0,c1` | ~2 KB | 28 | 13 |
+| `--level table` | ~2 KB | 44 | 35 |
 
 draw.io opens all of these, but past a few hundred columns the Columns page is too dense to read. So:
 

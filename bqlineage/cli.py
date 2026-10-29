@@ -101,7 +101,9 @@ def _parser() -> argparse.ArgumentParser:
     lp.add_argument("--level", choices=["table", "column", "both"], default="both")
     lp.add_argument("--raw", action="store_true",
                     help="show every hop: don't trace through temp tables/views or drop one-to-one copy steps")
-    lp.add_argument("--drawio", metavar="FILE", help="also write a draw.io diagram (pages follow --level)")
+    lp.add_argument("--drawio", metavar="FILE",
+                    help="also write a draw.io diagram with every CTE / subquery / temp table / view step "
+                         "(pages follow --level)")
     lp.add_argument("--openlineage", metavar="FILE", help="also write an OpenLineage event (see `publish`)")
 
     sp = sub.add_parser("scan", parents=[common], help="analyze many scripts into the catalog's lineage store")

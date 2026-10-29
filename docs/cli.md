@@ -63,7 +63,7 @@ An unknown key is an error, so a typo doesn't go unnoticed.
 - `--table` picks a target, as `project.dataset.table`, `dataset.table` or just `table`.
 - `--columns` picks columns, case-insensitively, separated by spaces or commas, with or without `--table`.
 - `--level` chooses what's printed, and which [diagram](exports.md) pages are drawn.
-- `--raw` shows every hop: temp tables and views as their own targets, and the one-to-one copy steps that are otherwise compacted away ([output.md](output.md)).
+- `--raw` shows every hop: temp tables and views as their own targets, and the one-to-one copy steps that are otherwise compacted away ([output.md](output.md)). In a diagram, it also draws the CTEs that only copy columns ([exports.md](exports.md#intermediate-steps)).
 
 **`scan`, `trace`**: see [scanning.md](scanning.md).
 
