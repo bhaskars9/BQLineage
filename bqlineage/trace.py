@@ -62,6 +62,17 @@ class Tracer:
             self.issue(severity, msg, idx, *((int(pos[1]), int(pos[2])) if pos else ()))
         if q is None:
             return []
+        # INSERT ... SELECT a.name, b.name: lineage is looked up by output name, so a repeated name would get the
+        # first one's sources. Number repeats as BigQuery names them in results: name, name_1, ...
+        taken, seen = {s.alias_or_name.lower() for s in q.selects}, set()
+        for s in q.selects:
+            if s.alias_or_name.lower() in seen and isinstance(s, exp.Alias):
+                k = 1
+                while f"{s.alias}_{k}".lower() in taken:
+                    k += 1
+                taken.add(f"{s.alias}_{k}".lower())
+                s.set("alias", exp.to_identifier(f"{s.alias}_{k}"))
+            seen.add(s.alias_or_name.lower())
         try:
             annotate_types(q, schema=mapping, dialect=D)
         except Exception:  # types only feed temp-table schemas; lineage doesn't need them
@@ -97,12 +108,19 @@ class Tracer:
                 self.issue("warning", f"Column lineage failed for `{name}`: {e}", idx)
             else:
                 keys = {}  # id(lineage node) -> its node in rec.flow
+                up = {id(c): p for p in node.walk() for c in p.downstream}
                 for n in node.walk():
                     if isinstance(n.expression, exp.Table):
                         rec.sources.add(self._col_key(n.expression, n.name))
                         keys[id(n)] = ("table", *self._col_key(n.expression, n.name).rsplit(".", 1))
                     elif isinstance(n.expression, exp.Placeholder):
-                        rec.unresolved.add(n.name)
+                        # a recursive CTE's FROM itself leads sqlglot back into the anchor branch, where it leaves
+                        # a placeholder for a table the anchor reads (and resolves) itself: nothing is missing
+                        p = up.get(id(n))
+                        s = scopes.get(id(p.source)) if p is not None else None
+                        alias = n.name.split(".")[0].strip('"`')
+                        if not (s and isinstance(s.selected_sources.get(alias, (None, None))[1], exp.Table)):
+                            rec.unresolved.add(n.name)
                     elif isinstance(n.source, exp.Select) and id(n.source) in scopes:
                         s = scopes[id(n.source)]
                         shape, why = self._conditions(s, ctx)

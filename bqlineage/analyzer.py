@@ -403,7 +403,8 @@ class _Analyzer(Tracer):
 
     def _merge(self, stmt, idx, target):
         using = stmt.args["using"]
-        base = exp.select().from_(target.copy()).join(using.copy(), on=stmt.args.get("on"))
+        # FROM the source: its rows are the ones merged in, so it's the driving table (the target is joined)
+        base = exp.select().from_(using.copy()).join(target.copy(), on=stmt.args.get("on"))
         tcols = list(self._cols(target)) or None
         label = f"MERGE {self.fqn(target)}"
         records = []

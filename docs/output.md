@@ -108,6 +108,7 @@ Steps that only copy a column one-to-one are left out: a CTE or temp table that 
 - **`sources`** keep each column's spelling from the table schema.
 - **Step text** shows names lower-cased, because BigQuery column names and aliases ignore case.
 - **Temp tables** are `_SESSION.name`. A re-created one is versioned (`_SESSION.name#2`), so each reader keeps its own lineage.
+- **A repeated output name** (`SELECT a.name, b.name`) is numbered the way BigQuery names result columns: `name`, `name_1`. An `INSERT` maps columns by position, so its target names are unaffected.
 
 ## Limits
 

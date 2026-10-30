@@ -66,6 +66,11 @@ def test_recursive_cte(schema):
     c = cols(sql, schema)
     assert c["<query>.emp_name"] == ["p.hr.employees.emp_name"]
     assert c["<query>.depth"] == []  # literal seed + self reference
+    # a branch that reads only the CTE itself: nothing goes unresolved, so no "Lineage stops" warning
+    r = analyze("INSERT INTO `p.dw.fact` (order_id, total) WITH RECURSIVE r AS (SELECT order_id, amount AS t "
+                "FROM `p.sales.orders` UNION ALL SELECT order_id + 1, t FROM r WHERE order_id < 5) SELECT order_id, t FROM r",
+                schema)
+    assert r.issues == [] and r.column_lineage()["p.dw.fact.total"] == ["p.sales.orders.amount"]
 
 
 def test_temp_tables_resolved_through(schema):
@@ -168,6 +173,15 @@ def test_unnest_struct_and_star(schema):
     assert c["<query>.city"] == ["p.sales.customers.address"]
     assert set(cols("SELECT * FROM `p.hr.employees`", schema)) == {
         "<query>.emp_id", "<query>.manager_id", "<query>.emp_name"}
+
+
+def test_repeated_output_names_keep_their_own_lineage():
+    s = DictSchemaProvider({"p.d.a": {"id": "INT64", "name": "STRING"}, "p.d.b": {"id": "INT64", "name": "STRING"},
+                            "p.d.out": {"x": "STRING", "y": "STRING"}})
+    r = analyze("INSERT INTO `p.d.out` (x, y) SELECT a.name, b.name FROM `p.d.a` a JOIN `p.d.b` b USING (id)", s)
+    assert r.column_lineage() == {"p.d.out.x": ["p.d.a.name"], "p.d.out.y": ["p.d.b.name"]}
+    r = analyze("SELECT a.name, b.name FROM `p.d.a` a JOIN `p.d.b` b USING (id)", s)
+    assert r.column_lineage() == {"<query>.name": ["p.d.a.name"], "<query>.name_1": ["p.d.b.name"]}  # as BigQuery
 
 
 def test_works_without_schema_for_qualified_columns():
@@ -405,7 +419,9 @@ def test_merge_and_update_conditions_are_in_the_steps(schema):
                 "WHEN MATCHED AND S.amount > 0 THEN UPDATE SET total = S.amount", schema)
     step = r.column_details()["p.dw.fact.total"]["steps"][0]
     # aliases and columns are case-insensitive in BigQuery; step text shows them normalized to lower case
-    assert step["joins"] == ["JOIN s ON t.order_id = s.order_id"] and step["where"] == "s.amount > 0"
+    # FROM the source, JOIN the target: the source's rows are the ones merged in
+    assert step["joins"] == ["JOIN t ON t.order_id = s.order_id"] and step["where"] == "s.amount > 0"
+    assert step["from"] == ["p.sales.orders AS s", "p.dw.fact AS t"]
     r = analyze("UPDATE dw.fact f SET total = o.amount FROM sales.orders o WHERE f.order_id = o.order_id", schema)
     d = r.column_details()["p.dw.fact.total"]
     assert d["steps"][0]["where"] == "f.order_id = o.order_id"
