@@ -1,0 +1,241 @@
+{
+  "version": 1,
+  "tables": {
+    "shop.dw.org_chart": [
+      "shop.hr.employees"
+    ],
+    "shop.dw.people": [
+      "shop.hr.contractors",
+      "shop.hr.employees",
+      "shop.hr.leavers"
+    ]
+  },
+  "columns": {
+    "shop.dw.org_chart.depth": {
+      "sources": [],
+      "indirect_sources": [
+        "shop.hr.employees.emp_id",
+        "shop.hr.employees.manager_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.org_chart.depth",
+          "expression": "c.depth",
+          "from": [
+            "chain AS c",
+            "shop.hr.employees AS m"
+          ],
+          "joins": [
+            "LEFT JOIN m ON m.emp_id = c.manager_id"
+          ]
+        },
+        {
+          "column": "chain.depth",
+          "in": "shop.dw.org_chart",
+          "expression": "0",
+          "from": [
+            "shop.hr.employees"
+          ],
+          "where": "employees.manager_id IS NULL"
+        },
+        {
+          "column": "chain.depth",
+          "in": "shop.dw.org_chart",
+          "expression": "c.depth + 1",
+          "from": [
+            "shop.hr.employees AS e",
+            "chain AS c"
+          ],
+          "joins": [
+            "JOIN c ON e.manager_id = c.emp_id"
+          ]
+        }
+      ]
+    },
+    "shop.dw.org_chart.emp_id": {
+      "sources": [
+        "shop.hr.employees.emp_id"
+      ],
+      "indirect_sources": [
+        "shop.hr.employees.emp_id",
+        "shop.hr.employees.manager_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.org_chart.emp_id",
+          "expression": "c.emp_id",
+          "from": [
+            "chain AS c",
+            "shop.hr.employees AS m"
+          ],
+          "joins": [
+            "LEFT JOIN m ON m.emp_id = c.manager_id"
+          ]
+        },
+        {
+          "column": "chain.emp_id",
+          "in": "shop.dw.org_chart",
+          "expression": "employees.emp_id",
+          "from": [
+            "shop.hr.employees"
+          ],
+          "where": "employees.manager_id IS NULL"
+        },
+        {
+          "column": "chain.emp_id",
+          "in": "shop.dw.org_chart",
+          "expression": "e.emp_id",
+          "from": [
+            "shop.hr.employees AS e",
+            "chain AS c"
+          ],
+          "joins": [
+            "JOIN c ON e.manager_id = c.emp_id"
+          ]
+        }
+      ]
+    },
+    "shop.dw.org_chart.manager_name": {
+      "sources": [
+        "shop.hr.employees.name"
+      ],
+      "indirect_sources": [
+        "shop.hr.employees.emp_id",
+        "shop.hr.employees.manager_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.org_chart.manager_name",
+          "expression": "m.name",
+          "from": [
+            "chain AS c",
+            "shop.hr.employees AS m"
+          ],
+          "joins": [
+            "LEFT JOIN m ON m.emp_id = c.manager_id"
+          ]
+        }
+      ]
+    },
+    "shop.dw.org_chart.name": {
+      "sources": [
+        "shop.hr.employees.name"
+      ],
+      "indirect_sources": [
+        "shop.hr.employees.emp_id",
+        "shop.hr.employees.manager_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.org_chart.name",
+          "expression": "c.name",
+          "from": [
+            "chain AS c",
+            "shop.hr.employees AS m"
+          ],
+          "joins": [
+            "LEFT JOIN m ON m.emp_id = c.manager_id"
+          ]
+        },
+        {
+          "column": "chain.name",
+          "in": "shop.dw.org_chart",
+          "expression": "employees.name",
+          "from": [
+            "shop.hr.employees"
+          ],
+          "where": "employees.manager_id IS NULL"
+        },
+        {
+          "column": "chain.name",
+          "in": "shop.dw.org_chart",
+          "expression": "e.name",
+          "from": [
+            "shop.hr.employees AS e",
+            "chain AS c"
+          ],
+          "joins": [
+            "JOIN c ON e.manager_id = c.emp_id"
+          ]
+        }
+      ]
+    },
+    "shop.dw.people.kind": {
+      "sources": [],
+      "indirect_sources": [
+        "shop.hr.contractors.contractor_id",
+        "shop.hr.employees.emp_id",
+        "shop.hr.leavers.emp_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.people.kind",
+          "expression": "people.kind",
+          "from": [
+            "(subquery) AS people"
+          ],
+          "where": "NOT people.id IN (SELECT leavers.emp_id AS emp_id FROM `shop.hr.leavers` AS leavers)"
+        },
+        {
+          "column": "(subquery).kind",
+          "in": "shop.dw.people",
+          "expression": "'staff'",
+          "from": [
+            "all_staff"
+          ]
+        },
+        {
+          "column": "(subquery).kind",
+          "in": "shop.dw.people",
+          "expression": "'contractor'",
+          "from": [
+            "shop.hr.contractors"
+          ]
+        }
+      ]
+    },
+    "shop.dw.people.name": {
+      "sources": [
+        "shop.hr.contractors.name",
+        "shop.hr.employees.name"
+      ],
+      "indirect_sources": [
+        "shop.hr.contractors.contractor_id",
+        "shop.hr.employees.emp_id",
+        "shop.hr.leavers.emp_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.people.name",
+          "expression": "people.name",
+          "from": [
+            "(subquery) AS people"
+          ],
+          "where": "NOT people.id IN (SELECT leavers.emp_id AS emp_id FROM `shop.hr.leavers` AS leavers)"
+        }
+      ]
+    },
+    "shop.dw.people.person_id": {
+      "sources": [
+        "shop.hr.contractors.contractor_id",
+        "shop.hr.employees.emp_id"
+      ],
+      "indirect_sources": [
+        "shop.hr.contractors.contractor_id",
+        "shop.hr.employees.emp_id",
+        "shop.hr.leavers.emp_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.people.person_id",
+          "expression": "people.id",
+          "from": [
+            "(subquery) AS people"
+          ],
+          "where": "NOT people.id IN (SELECT leavers.emp_id AS emp_id FROM `shop.hr.leavers` AS leavers)"
+        }
+      ]
+    }
+  },
+  "issues": []
+}

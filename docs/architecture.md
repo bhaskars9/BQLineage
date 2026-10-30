@@ -66,4 +66,5 @@ No BigQuery access is needed: the BigQuery client is mocked. There is one test f
 - **Golden tests** (`tests/golden/`): realistic scripts with their expected lineage checked in next to them. A change in output fails with a diff.
   - When a change is intended, run `pytest tests/test_golden.py --update-golden` and review `git diff tests/golden`.
   - To guard your own SQL, add an anonymized production script: put the `.sql` in that folder, add its tables to `schema.json`, regenerate, and check the new `.json` by hand before committing it.
+- **Example tests** (`tests/test_examples.py`): every command in [examples/README.md](../examples/README.md) still gives the output checked in next to it. `--update-golden` rewrites those too; review `git diff examples`.
 - **Compatibility tests** (`tests/test_compat.py`): the sqlglot behaviours bqlineage depends on.

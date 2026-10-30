@@ -1,0 +1,316 @@
+{
+  "version": 1,
+  "tables": {
+    "shop.dw.budget_vs_actual": [
+      "shop.catalog.products",
+      "shop.fin.budget",
+      "shop.sales.order_items"
+    ],
+    "shop.dw.order_report": [
+      "shop.crm.blocked",
+      "shop.crm.customers",
+      "shop.crm.segments",
+      "shop.sales.orders"
+    ],
+    "shop.dw.product_sales": [
+      "shop.catalog.products",
+      "shop.sales.order_items"
+    ]
+  },
+  "columns": {
+    "shop.dw.budget_vs_actual.actual": {
+      "sources": [
+        "shop.sales.order_items.price",
+        "shop.sales.order_items.qty"
+      ],
+      "indirect_sources": [
+        "shop.catalog.products.category",
+        "shop.catalog.products.sku",
+        "shop.fin.budget.category",
+        "shop.sales.order_items.sku"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.budget_vs_actual.actual",
+          "expression": "a.amount",
+          "from": [
+            "shop.fin.budget AS b",
+            "(subquery) AS a"
+          ],
+          "joins": [
+            "FULL JOIN a ON a.category = b.category"
+          ]
+        },
+        {
+          "column": "(subquery).amount",
+          "in": "shop.dw.budget_vs_actual",
+          "expression": "SUM(i.qty * i.price)",
+          "from": [
+            "shop.sales.order_items AS i",
+            "shop.catalog.products AS p"
+          ],
+          "joins": [
+            "JOIN p ON i.sku = p.sku"
+          ],
+          "group_by": [
+            "p.category"
+          ]
+        }
+      ]
+    },
+    "shop.dw.budget_vs_actual.budget": {
+      "sources": [
+        "shop.fin.budget.amount"
+      ],
+      "indirect_sources": [
+        "shop.catalog.products.category",
+        "shop.catalog.products.sku",
+        "shop.fin.budget.category",
+        "shop.sales.order_items.sku"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.budget_vs_actual.budget",
+          "expression": "b.amount",
+          "from": [
+            "shop.fin.budget AS b",
+            "(subquery) AS a"
+          ],
+          "joins": [
+            "FULL JOIN a ON a.category = b.category"
+          ]
+        }
+      ]
+    },
+    "shop.dw.budget_vs_actual.category": {
+      "sources": [
+        "shop.catalog.products.category",
+        "shop.fin.budget.category"
+      ],
+      "indirect_sources": [
+        "shop.catalog.products.category",
+        "shop.catalog.products.sku",
+        "shop.fin.budget.category",
+        "shop.sales.order_items.sku"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.budget_vs_actual.category",
+          "expression": "COALESCE(b.category, a.category)",
+          "from": [
+            "shop.fin.budget AS b",
+            "(subquery) AS a"
+          ],
+          "joins": [
+            "FULL JOIN a ON a.category = b.category"
+          ]
+        },
+        {
+          "column": "(subquery).category",
+          "in": "shop.dw.budget_vs_actual",
+          "expression": "p.category",
+          "from": [
+            "shop.sales.order_items AS i",
+            "shop.catalog.products AS p"
+          ],
+          "joins": [
+            "JOIN p ON i.sku = p.sku"
+          ],
+          "group_by": [
+            "p.category"
+          ]
+        }
+      ]
+    },
+    "shop.dw.order_report.amount": {
+      "sources": [
+        "shop.sales.orders.amount"
+      ],
+      "indirect_sources": [
+        "shop.crm.blocked.customer_id",
+        "shop.crm.customers.customer_id",
+        "shop.crm.segments.customer_id",
+        "shop.sales.orders.customer_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_report.amount",
+          "expression": "o.amount",
+          "from": [
+            "shop.sales.orders AS o",
+            "shop.crm.customers AS c",
+            "shop.crm.segments AS s"
+          ],
+          "joins": [
+            "LEFT JOIN c ON c.customer_id = o.customer_id",
+            "LEFT JOIN s ON s.customer_id = o.customer_id"
+          ],
+          "where": "NOT o.customer_id IN (SELECT blocked.customer_id AS customer_id FROM `shop.crm.blocked` AS blocked)"
+        }
+      ]
+    },
+    "shop.dw.order_report.customer_name": {
+      "sources": [
+        "shop.crm.customers.name"
+      ],
+      "indirect_sources": [
+        "shop.crm.blocked.customer_id",
+        "shop.crm.customers.customer_id",
+        "shop.crm.segments.customer_id",
+        "shop.sales.orders.customer_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_report.customer_name",
+          "expression": "c.name",
+          "from": [
+            "shop.sales.orders AS o",
+            "shop.crm.customers AS c",
+            "shop.crm.segments AS s"
+          ],
+          "joins": [
+            "LEFT JOIN c ON c.customer_id = o.customer_id",
+            "LEFT JOIN s ON s.customer_id = o.customer_id"
+          ],
+          "where": "NOT o.customer_id IN (SELECT blocked.customer_id AS customer_id FROM `shop.crm.blocked` AS blocked)"
+        }
+      ]
+    },
+    "shop.dw.order_report.order_id": {
+      "sources": [
+        "shop.sales.orders.order_id"
+      ],
+      "indirect_sources": [
+        "shop.crm.blocked.customer_id",
+        "shop.crm.customers.customer_id",
+        "shop.crm.segments.customer_id",
+        "shop.sales.orders.customer_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_report.order_id",
+          "expression": "o.order_id",
+          "from": [
+            "shop.sales.orders AS o",
+            "shop.crm.customers AS c",
+            "shop.crm.segments AS s"
+          ],
+          "joins": [
+            "LEFT JOIN c ON c.customer_id = o.customer_id",
+            "LEFT JOIN s ON s.customer_id = o.customer_id"
+          ],
+          "where": "NOT o.customer_id IN (SELECT blocked.customer_id AS customer_id FROM `shop.crm.blocked` AS blocked)"
+        }
+      ]
+    },
+    "shop.dw.order_report.segment": {
+      "sources": [
+        "shop.crm.segments.segment"
+      ],
+      "indirect_sources": [
+        "shop.crm.blocked.customer_id",
+        "shop.crm.customers.customer_id",
+        "shop.crm.segments.customer_id",
+        "shop.sales.orders.customer_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_report.segment",
+          "expression": "s.segment",
+          "from": [
+            "shop.sales.orders AS o",
+            "shop.crm.customers AS c",
+            "shop.crm.segments AS s"
+          ],
+          "joins": [
+            "LEFT JOIN c ON c.customer_id = o.customer_id",
+            "LEFT JOIN s ON s.customer_id = o.customer_id"
+          ],
+          "where": "NOT o.customer_id IN (SELECT blocked.customer_id AS customer_id FROM `shop.crm.blocked` AS blocked)"
+        }
+      ]
+    },
+    "shop.dw.product_sales.product_name": {
+      "sources": [
+        "shop.catalog.products.name"
+      ],
+      "indirect_sources": [
+        "shop.catalog.products.name",
+        "shop.catalog.products.sku",
+        "shop.sales.order_items.sku"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.product_sales.product_name",
+          "expression": "p.name",
+          "from": [
+            "shop.sales.order_items AS i",
+            "shop.catalog.products AS p"
+          ],
+          "joins": [
+            "RIGHT JOIN p ON p.sku = i.sku"
+          ],
+          "group_by": [
+            "p.sku",
+            "p.name"
+          ]
+        }
+      ]
+    },
+    "shop.dw.product_sales.sku": {
+      "sources": [
+        "shop.catalog.products.sku"
+      ],
+      "indirect_sources": [
+        "shop.catalog.products.name",
+        "shop.catalog.products.sku",
+        "shop.sales.order_items.sku"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.product_sales.sku",
+          "expression": "p.sku",
+          "from": [
+            "shop.sales.order_items AS i",
+            "shop.catalog.products AS p"
+          ],
+          "joins": [
+            "RIGHT JOIN p ON p.sku = i.sku"
+          ],
+          "group_by": [
+            "p.sku",
+            "p.name"
+          ]
+        }
+      ]
+    },
+    "shop.dw.product_sales.units": {
+      "sources": [
+        "shop.sales.order_items.qty"
+      ],
+      "indirect_sources": [
+        "shop.catalog.products.name",
+        "shop.catalog.products.sku",
+        "shop.sales.order_items.sku"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.product_sales.units",
+          "expression": "IFNULL(SUM(i.qty), 0)",
+          "from": [
+            "shop.sales.order_items AS i",
+            "shop.catalog.products AS p"
+          ],
+          "joins": [
+            "RIGHT JOIN p ON p.sku = i.sku"
+          ],
+          "group_by": [
+            "p.sku",
+            "p.name"
+          ]
+        }
+      ]
+    }
+  },
+  "issues": []
+}

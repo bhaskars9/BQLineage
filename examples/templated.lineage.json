@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "tables": {
+    "shop.dw.order_lines": [
+      "shop.sales.order_items",
+      "shop.sales.orders"
+    ]
+  },
+  "columns": {
+    "shop.dw.order_lines.line_total": {
+      "sources": [
+        "shop.sales.order_items.price",
+        "shop.sales.order_items.qty"
+      ],
+      "indirect_sources": [
+        "shop.sales.order_items.order_id",
+        "shop.sales.order_items.qty",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.order_ts"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_lines.line_total",
+          "expression": "i.qty * i.price",
+          "from": [
+            "_SESSION.todays_orders AS t",
+            "shop.sales.order_items AS i"
+          ],
+          "joins": [
+            "JOIN i ON t.order_id = i.order_id"
+          ],
+          "where": "i.qty >= 1"
+        }
+      ]
+    },
+    "shop.dw.order_lines.order_id": {
+      "sources": [
+        "shop.sales.orders.order_id"
+      ],
+      "indirect_sources": [
+        "shop.sales.order_items.order_id",
+        "shop.sales.order_items.qty",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.order_ts"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_lines.order_id",
+          "expression": "t.order_id",
+          "from": [
+            "_SESSION.todays_orders AS t",
+            "shop.sales.order_items AS i"
+          ],
+          "joins": [
+            "JOIN i ON t.order_id = i.order_id"
+          ],
+          "where": "i.qty >= 1"
+        },
+        {
+          "column": "_SESSION.todays_orders.order_id",
+          "expression": "orders.order_id",
+          "from": [
+            "shop.sales.orders"
+          ],
+          "where": "DATE(orders.order_ts) = '2026-10-27'"
+        }
+      ]
+    },
+    "shop.dw.order_lines.qty": {
+      "sources": [
+        "shop.sales.order_items.qty"
+      ],
+      "indirect_sources": [
+        "shop.sales.order_items.order_id",
+        "shop.sales.order_items.qty",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.order_ts"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_lines.qty",
+          "expression": "i.qty",
+          "from": [
+            "_SESSION.todays_orders AS t",
+            "shop.sales.order_items AS i"
+          ],
+          "joins": [
+            "JOIN i ON t.order_id = i.order_id"
+          ],
+          "where": "i.qty >= 1"
+        }
+      ]
+    },
+    "shop.dw.order_lines.sku": {
+      "sources": [
+        "shop.sales.order_items.sku"
+      ],
+      "indirect_sources": [
+        "shop.sales.order_items.order_id",
+        "shop.sales.order_items.qty",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.order_ts"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.order_lines.sku",
+          "expression": "i.sku",
+          "from": [
+            "_SESSION.todays_orders AS t",
+            "shop.sales.order_items AS i"
+          ],
+          "joins": [
+            "JOIN i ON t.order_id = i.order_id"
+          ],
+          "where": "i.qty >= 1"
+        }
+      ]
+    }
+  },
+  "issues": []
+}

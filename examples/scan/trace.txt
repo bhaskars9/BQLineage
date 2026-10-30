@@ -1,0 +1,11 @@
+$ bqlineage trace rpt.region_totals.total
+shop.rpt.region_totals.total
+`-- shop.dw.customer_totals.total  [examples/scan/3_report.sql]
+    `-- shop.stage.paid_orders.amount  [examples/scan/2_totals.sql]
+        `-- shop.sales.orders.amount  [examples/scan/1_stage.sql]
+
+$ bqlineage trace sales.orders --downstream
+shop.sales.orders
+`-- shop.stage.paid_orders  [examples/scan/1_stage.sql]
+    `-- shop.dw.customer_totals  [examples/scan/2_totals.sql]
+        `-- shop.rpt.region_totals  [examples/scan/3_report.sql]

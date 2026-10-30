@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "tables": {
+    "shop.dw.daily_events": [
+      "shop.web.events_*"
+    ],
+    "shop.dw.eu_customers": [
+      "shop.crm.customers"
+    ],
+    "shop.dw.eu_order_counts": [
+      "shop.crm.customers",
+      "shop.sales.orders"
+    ]
+  },
+  "columns": {
+    "shop.dw.daily_events.day": {
+      "sources": [
+        "shop.web.events_*._TABLE_SUFFIX"
+      ],
+      "indirect_sources": [
+        "shop.web.events_*._TABLE_SUFFIX",
+        "shop.web.events_*.event_name"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.daily_events.day",
+          "expression": "PARSE_DATE('%Y%m%d', `events_*`._table_suffix)",
+          "from": [
+            "shop.web.events_*"
+          ],
+          "where": "_table_suffix BETWEEN '20260101' AND '20260131'",
+          "group_by": [
+            "PARSE_DATE('%Y%m%d', _table_suffix)",
+            "`events_*`.event_name"
+          ]
+        }
+      ]
+    },
+    "shop.dw.daily_events.event_name": {
+      "sources": [
+        "shop.web.events_*.event_name"
+      ],
+      "indirect_sources": [
+        "shop.web.events_*._TABLE_SUFFIX",
+        "shop.web.events_*.event_name"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.daily_events.event_name",
+          "expression": "`events_*`.event_name",
+          "from": [
+            "shop.web.events_*"
+          ],
+          "where": "_table_suffix BETWEEN '20260101' AND '20260131'",
+          "group_by": [
+            "PARSE_DATE('%Y%m%d', _table_suffix)",
+            "`events_*`.event_name"
+          ]
+        }
+      ]
+    },
+    "shop.dw.daily_events.users": {
+      "sources": [
+        "shop.web.events_*.user_id"
+      ],
+      "indirect_sources": [
+        "shop.web.events_*._TABLE_SUFFIX",
+        "shop.web.events_*.event_name"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.daily_events.users",
+          "expression": "COUNT(DISTINCT `events_*`.user_id)",
+          "from": [
+            "shop.web.events_*"
+          ],
+          "where": "_table_suffix BETWEEN '20260101' AND '20260131'",
+          "group_by": [
+            "PARSE_DATE('%Y%m%d', _table_suffix)",
+            "`events_*`.event_name"
+          ]
+        }
+      ]
+    },
+    "shop.dw.eu_customers.customer_id": {
+      "sources": [
+        "shop.crm.customers.customer_id"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.email",
+        "shop.crm.customers.region"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.eu_customers.customer_id",
+          "expression": "customers_v.customer_id",
+          "from": [
+            "shop.crm.customers_v"
+          ],
+          "where": "customers_v.region = 'EU'"
+        },
+        {
+          "column": "shop.crm.customers_v.customer_id",
+          "expression": "customers.customer_id",
+          "from": [
+            "shop.crm.customers"
+          ],
+          "where": "NOT customers.email IS NULL"
+        }
+      ]
+    },
+    "shop.dw.eu_customers.name": {
+      "sources": [
+        "shop.crm.customers.name"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.email",
+        "shop.crm.customers.region"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.eu_customers.name",
+          "expression": "customers_v.name",
+          "from": [
+            "shop.crm.customers_v"
+          ],
+          "where": "customers_v.region = 'EU'"
+        },
+        {
+          "column": "shop.crm.customers_v.name",
+          "expression": "customers.name",
+          "from": [
+            "shop.crm.customers"
+          ],
+          "where": "NOT customers.email IS NULL"
+        }
+      ]
+    },
+    "shop.dw.eu_order_counts.name": {
+      "sources": [
+        "shop.crm.customers.name"
+      ],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.email",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.sales.orders.customer_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.eu_order_counts.name",
+          "expression": "e.name",
+          "from": [
+            "shop.dw.eu_customers AS e",
+            "shop.sales.orders AS o"
+          ],
+          "joins": [
+            "JOIN o ON e.customer_id = o.customer_id"
+          ],
+          "group_by": [
+            "e.name"
+          ]
+        },
+        {
+          "column": "shop.dw.eu_customers.name",
+          "expression": "customers_v.name",
+          "from": [
+            "shop.crm.customers_v"
+          ],
+          "where": "customers_v.region = 'EU'"
+        },
+        {
+          "column": "shop.crm.customers_v.name",
+          "expression": "customers.name",
+          "from": [
+            "shop.crm.customers"
+          ],
+          "where": "NOT customers.email IS NULL"
+        }
+      ]
+    },
+    "shop.dw.eu_order_counts.orders": {
+      "sources": [],
+      "indirect_sources": [
+        "shop.crm.customers.customer_id",
+        "shop.crm.customers.email",
+        "shop.crm.customers.name",
+        "shop.crm.customers.region",
+        "shop.sales.orders.customer_id"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.eu_order_counts.orders",
+          "expression": "COUNT(*)",
+          "from": [
+            "shop.dw.eu_customers AS e",
+            "shop.sales.orders AS o"
+          ],
+          "joins": [
+            "JOIN o ON e.customer_id = o.customer_id"
+          ],
+          "group_by": [
+            "e.name"
+          ]
+        }
+      ]
+    }
+  },
+  "issues": []
+}

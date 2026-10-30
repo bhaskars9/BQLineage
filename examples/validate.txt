@@ -1,0 +1,6 @@
+WARNING: Template placeholder `status` has no value: pass --var status=... or set it under [vars] in bqlineage.toml
+ERROR [statement 1] [line 4]: Unknown column: amount_usd
+ERROR [statement 2] [line 7]: INSERT shop.dw.net_revenue: query returns 3 columns but target has 2
+ERROR [statement 3] [line 11]: Table `shop.sales.archive` not found
+WARNING [statement 3] [line 11]: SELECT * not expanded: table schema unknown
+FAILED

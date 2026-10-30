@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "tables": {
+    "<query#7>": [],
+    "shop.dw.net_revenue": [
+      "shop.sales.orders",
+      "shop.sales.refunds"
+    ]
+  },
+  "columns": {
+    "<query#7>.failure": {
+      "sources": [],
+      "indirect_sources": [],
+      "steps": [
+        {
+          "column": "<query#7>.failure",
+          "expression": "@@error.message"
+        }
+      ]
+    },
+    "shop.dw.net_revenue.customer_id": {
+      "sources": [
+        "shop.sales.orders.customer_id"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.status",
+        "shop.sales.refunds.order_id",
+        "shop.sales.refunds.refund_amount"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.net_revenue.customer_id",
+          "expression": "o.customer_id",
+          "from": [
+            "shop.sales.orders AS o",
+            "_SESSION.refunds AS r"
+          ],
+          "joins": [
+            "LEFT JOIN r ON o.order_id = r.order_id"
+          ],
+          "where": "o.status = 'PAID'",
+          "group_by": [
+            "o.customer_id"
+          ]
+        }
+      ]
+    },
+    "shop.dw.net_revenue.net": {
+      "sources": [
+        "shop.sales.orders.amount",
+        "shop.sales.refunds.refund_amount"
+      ],
+      "indirect_sources": [
+        "shop.sales.orders.customer_id",
+        "shop.sales.orders.order_id",
+        "shop.sales.orders.status",
+        "shop.sales.refunds.order_id",
+        "shop.sales.refunds.refund_amount"
+      ],
+      "steps": [
+        {
+          "column": "shop.dw.net_revenue.net",
+          "expression": "SUM(o.amount - IFNULL(r.refunded, 0))",
+          "from": [
+            "shop.sales.orders AS o",
+            "_SESSION.refunds AS r"
+          ],
+          "joins": [
+            "LEFT JOIN r ON o.order_id = r.order_id"
+          ],
+          "where": "o.status = 'PAID'",
+          "group_by": [
+            "o.customer_id"
+          ]
+        },
+        {
+          "column": "_SESSION.refunds#2.refunded",
+          "expression": "refunds.refunded",
+          "from": [
+            "_SESSION.refunds"
+          ],
+          "where": "refunds.refunded > 0"
+        },
+        {
+          "column": "_SESSION.refunds.refunded",
+          "expression": "SUM(refunds.refund_amount)",
+          "from": [
+            "shop.sales.refunds"
+          ],
+          "group_by": [
+            "refunds.order_id"
+          ]
+        }
+      ]
+    }
+  },
+  "issues": []
+}

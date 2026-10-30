@@ -1,0 +1,412 @@
+{
+  "eventType": "COMPLETE",
+  "eventTime": "2026-10-29T00:00:00Z",
+  "producer": "https://github.com/bhaskars9/BQLineage",
+  "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunEvent",
+  "run": {
+    "runId": "00000000-0000-0000-0000-000000000000"
+  },
+  "job": {
+    "namespace": "bqlineage",
+    "name": "examples/orders.sql"
+  },
+  "inputs": [
+    {
+      "namespace": "bigquery",
+      "name": "shop.crm.customers"
+    },
+    {
+      "namespace": "bigquery",
+      "name": "shop.sales.orders"
+    }
+  ],
+  "outputs": [
+    {
+      "namespace": "bigquery",
+      "name": "shop.dw.customer_revenue",
+      "facets": {
+        "columnLineage": {
+          "_producer": "https://github.com/bhaskars9/BQLineage",
+          "_schemaURL": "https://openlineage.io/spec/facets/1-2-0/ColumnLineageDatasetFacet.json#/$defs/ColumnLineageDatasetFacet",
+          "fields": {
+            "customer_id": {
+              "inputFields": [
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "DIRECT",
+                      "subtype": "TRANSFORMATION"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "DIRECT",
+                      "subtype": "TRANSFORMATION"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "name",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "region",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "order_ts",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "status",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                }
+              ]
+            },
+            "customer_name": {
+              "inputFields": [
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "name",
+                  "transformations": [
+                    {
+                      "type": "DIRECT",
+                      "subtype": "IDENTITY"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "name",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "region",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "order_ts",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "status",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                }
+              ]
+            },
+            "loaded_at": {
+              "inputFields": [
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "name",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "region",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "order_ts",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "status",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                }
+              ]
+            },
+            "region": {
+              "inputFields": [
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "region",
+                  "transformations": [
+                    {
+                      "type": "DIRECT",
+                      "subtype": "IDENTITY"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "name",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "region",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "order_ts",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "status",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                }
+              ]
+            },
+            "revenue": {
+              "inputFields": [
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "amount",
+                  "transformations": [
+                    {
+                      "type": "DIRECT",
+                      "subtype": "AGGREGATION"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "name",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.crm.customers",
+                  "field": "region",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "customer_id",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "order_ts",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                },
+                {
+                  "namespace": "bigquery",
+                  "name": "shop.sales.orders",
+                  "field": "status",
+                  "transformations": [
+                    {
+                      "type": "INDIRECT"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# Settings for the examples: run them from the repo root with --config examples/bqlineage.toml.
+# A bqlineage.toml in the folder you run from is read without --config.
+schema = "examples/schema.json"   # offline schemas instead of BigQuery (relative to where you run bqlineage)
+
+[vars]                            # template values (templated.sql)
+project = "shop"
+ds = "2026-10-27"
+min_qty = "1"

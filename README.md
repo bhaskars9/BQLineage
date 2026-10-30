@@ -42,6 +42,7 @@ env = "prod"       # fills {{ env }} / ${env} in templated SQL
 
 ## Documentation
 
+- [Examples](examples/README.md): one runnable example per feature, with its output
 - [Reading the output](docs/output.md): the JSON, a worked example, and what each part means
 - [Command line](docs/cli.md): every command and option, and `bqlineage.toml`
 - [Schema catalog](docs/catalog.md): sync, refresh, offline use, multiple projects
