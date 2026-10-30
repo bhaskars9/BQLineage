@@ -18,7 +18,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import zlib
 from itertools import accumulate, pairwise
-from statistics import median_low
+from statistics import median
 from types import SimpleNamespace
 
 from .trace import OUT
@@ -184,15 +184,25 @@ def _levels(edges: dict) -> dict:
 
 
 def _ranks(level: dict, feeds: dict) -> dict:
-    """Vertical order within each layout column: the rightmost by name, then every node next to the nodes it
-    feeds (average of their positions), so arrows run mostly straight instead of crossing."""
-    rank: dict = {}
-    for lvl in sorted(set(level.values()), reverse=True):
-        def key(n):
-            down = [rank[d] for d in feeds.get(n, ()) if d in rank]
-            return (sum(down) / len(down) if down else float("inf"), n)
-        for i, n in enumerate(sorted((n for n in level if level[n] == lvl), key=key)):
-            rank[n] = i
+    """Vertical order within each layout column, so arrows run mostly straight instead of crossing: by name at
+    first, then three sweeps (right to left, left to right, right to left), each moving every node to the
+    average position of its neighbours on one side. A node with none on that side keeps its place."""
+    reads: dict = {}
+    for s, ds in feeds.items():
+        for d in ds:
+            reads.setdefault(d, set()).add(s)
+    cols: dict = {}
+    for n in sorted(level, key=str):
+        cols.setdefault(level[n], []).append(n)
+    rank = {n: i for col in cols.values() for i, n in enumerate(col)}
+    right, left = sorted(cols, reverse=True), sorted(cols)
+    for order, near in ((right, feeds), (left, reads), (right, feeds)):
+        for k in order:
+            def key(n):
+                at = [rank[m] for m in near.get(n, ()) if m in rank]
+                return (sum(at) / len(at) if at else rank[n]), rank[n]
+            cols[k].sort(key=key)
+            rank.update((n, i) for i, n in enumerate(cols[k]))
     return rank
 
 
@@ -239,6 +249,8 @@ def _layout(level: dict, size: dict, wires: list) -> tuple[dict, list]:
     for items in cols.values():
         y.update(zip(items, accumulate([0, *gaps(items)])))
 
+    linked = {n for a, _, b, _, _ in links() for n in (a, b)}
+
     def sweep(order, up, pin=False):  # each column in turn lines up with its neighbours on one side; pin: lanes stay
         near: dict = {}
         for a, ao, b, bo, _ in links():
@@ -250,9 +262,11 @@ def _layout(level: dict, size: dict, wires: list) -> tuple[dict, list]:
             items = cols[k]
             want = [[] if pin and n[0] == "~" else [y[m] + mo - no for no, m, mo in near.get(n, ())] for n in items]
             weight = [1e9 if pin and n[0] == "~" else len(w) or 0.01 for w, n in zip(want, items)]
-            # the median, not the mean: most rows line up exactly and one wire bends, rather than all bending
-            y.update(zip(items, _pack([median_low(w) if w else y[n] for w, n in zip(want, items)], weight,
-                                      gaps(items))))
+            # the median, not the mean: most rows line up exactly and one wire bends, rather than all bending.
+            # A box with no arrows at all (None) sits next to its neighbours, not where it happened to start
+            at = [None if n not in linked else median(w) if w else y[n] for w, n in zip(want, items)]
+            if any(v is not None for v in at):
+                y.update(zip(items, _pack(at, weight, gaps(items))))
 
     def share():  # arrows into a box, spread down its left side in the order they come from
         for t, idx in into.items():
@@ -320,10 +334,15 @@ def _layout(level: dict, size: dict, wires: list) -> tuple[dict, list]:
 
 def _pack(want: list, weight: list, gap: list) -> list:
     """Positions as close as possible (weighted least squares) to `want`, in order, each at least gap[i] below the
-    previous: isotonic regression (pool adjacent violators) after taking the gaps out."""
+    previous: isotonic regression (pool adjacent violators) after taking the gaps out. A None in `want` (at least
+    one isn't) means anywhere: right below the one above it, or above the first one wanted."""
     off = list(accumulate([0, *gap]))
+    z = [None if a is None else a - o for a, o in zip(want, off)]
+    last = next(v for v in z if v is not None)
+    for i, v in enumerate(z):
+        z[i] = last = last if v is None else v
     blocks: list[list] = []  # [value, weight, count]
-    for v, w in zip((a - o for a, o in zip(want, off)), weight):
+    for v, w in zip(z, weight):
         blocks.append([v, w, 1])
         while len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
             v2, w2, c2 = blocks.pop()
@@ -450,7 +469,7 @@ def _tables_page(result, resolve, table):
     pos, routes = _layout(level, size, wires)
     cells, ids = _Cells(), {}
     cells.legend({_kind(result, n) for n in size}, {w[4] for w in wires})
-    for n, (x, y) in pos.items():
+    for n, (x, y) in sorted(pos.items(), key=lambda kv: kv[1]):  # reading order: left to right, top down
         style = TABLE + KINDS[_kind(result, n)][0]
         ids[n] = cells.vertex(_label(n), style, x, y, size[n][0], size[n][1], tooltip=_about(g, n))
     for (s, _, t, _, d), route in zip(wires, routes):
@@ -501,7 +520,7 @@ def _columns_page(result, resolve, table, columns):
     pos, routes = _layout(level, size, [(x[0], at[x], n[0], at[n], d) for (x, n), d in links])
     cells, ids = _Cells(), {}
     cells.legend({_kind(result, b) for b in size}, set(g.links.values()))
-    for b, (x, y) in pos.items():
+    for b, (x, y) in sorted(pos.items(), key=lambda kv: kv[1]):
         w = size[b][0]
         box = cells.vertex(_label(b), CONTAINER + KINDS[_kind(result, b)][0], x, y, w, size[b][1],
                            tooltip=_about(g, b))
