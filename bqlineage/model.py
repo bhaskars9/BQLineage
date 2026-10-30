@@ -36,8 +36,9 @@ class ColumnRecord:
     indirect: set[str] = field(default_factory=set)  # columns the conditions along the way read
     unresolved: set[str] = field(default_factory=set)  # references whose source couldn't be found
     # the graph behind `sources`, for diagrams. node -> {"inputs": {node, ...}, "steps": [...], "same": bool,
-    # "filters": {tables its JOIN / WHERE / ... read}}. A node is ("table", table, column),
-    # ("cte" | "subquery", name, column), or ("out", "", "") for this column
+    # "filters": {tables its JOIN / WHERE / ... read}, "driving": {boxes that decide its rows: FROM, RIGHT JOIN}}.
+    # A node is ("table", table, column), ("cte" | "subquery", name, column), or ("out", "", "") for this column;
+    # a box is a node without its column
     flow: dict[tuple, dict] = field(default_factory=dict)
 
 

@@ -293,11 +293,13 @@ class _Analyzer(Tracer):
             d["unresolved"] |= rec.unresolved
             d["steps"] += [st for st in rec.steps if st not in d["steps"]]
             for node, f in rec.flow.items():
-                g = d["flow"].setdefault(node, {"inputs": set(), "steps": [], "same": True, "filters": set()})
+                g = d["flow"].setdefault(node, {"inputs": set(), "steps": [], "same": True, "filters": set(),
+                                                "driving": set()})
                 g["inputs"] |= f["inputs"]
                 g["steps"] += [st for st in f["steps"] if st not in g["steps"]]
                 g["same"] = g["same"] and f["same"]
                 g["filters"] |= f["filters"]
+                g["driving"] |= f["driving"]
         sink = self.statements if sink is None else sink
         sink.append(StatementLineage(idx, kind, name, sources, columns, details))
 

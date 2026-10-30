@@ -134,13 +134,15 @@ class Tracer:
                             rec.steps.append(step)
                         rec.indirect |= why
                         keys[id(n)] = key
-                        f = rec.flow.setdefault(key, {"inputs": set(), "steps": [], "same": True, "filters": set()})
+                        f = rec.flow.setdefault(key, {"inputs": set(), "steps": [], "same": True, "filters": set(),
+                                                      "driving": set()})
                         plain = {k: v for k, v in step.items() if k not in ("label", "same")}
                         if plain not in f["steps"]:
                             f["steps"].append(plain)
                         # a diagram can skip a copy, but not a UNION: that's where inputs come together
                         f["same"] = f["same"] and "same" in step and s.scope_type != ScopeType.SET_OPERATION
                         f["filters"] |= {c.rsplit(".", 1)[0] for c in why}  # tables its conditions read
+                        f["driving"] |= self._driving(s)
                 _link(node, None, keys, rec.flow, set())
             if name == "*":
                 self.issue("warning", f"SELECT * not expanded: table schema unknown{self._no_schema()}", idx)
@@ -193,6 +195,28 @@ class Tracer:
                     indirect |= self._resolve(col, sub_scope, ctx)
         ctx.conds[id(scope.expression)] = (shape, indirect)
         return shape, indirect
+
+    def _driving(self, scope: Scope) -> set[tuple]:
+        """The sources that decide which rows a SELECT has: its FROM, a RIGHT JOIN's right side, both sides of a
+        FULL JOIN. Other joins (LEFT, INNER, CROSS, comma) only add columns or filter. As flow boxes:
+        ("table", name), ("cte", name) or ("subquery", alias)."""
+        sel = scope.expression
+        frm = sel.args.get("from_") or sel.args.get("from")
+        lead = [frm.this.alias_or_name] if frm else []
+        for j in sel.args.get("joins") or []:
+            if j.side == "RIGHT":
+                lead = [j.this.alias_or_name]
+            elif j.side == "FULL":
+                lead.append(j.this.alias_or_name)
+        out = set()
+        for alias in lead:
+            src = scope.selected_sources.get(alias, (None, None))[1]
+            if isinstance(src, exp.Table):
+                out.add(("table", self._v(self.fqn(src))))
+            elif isinstance(src, Scope):  # named the way the flow keys name them
+                p = src.expression.parent
+                out.add(("cte", p.alias) if isinstance(p, exp.CTE) else ("subquery", p.alias_or_name))
+        return out
 
     def _source_label(self, alias: str, node, src) -> str:
         """A FROM/JOIN item as a reader would name it: "proj.ds.t AS o", "eu_customers AS c", "(subquery) AS x"."""

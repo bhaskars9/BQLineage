@@ -11,7 +11,27 @@ The file opens in the [draw.io](https://www.drawio.com) desktop app, at [diagram
 - **Tables:** boxes flow left to right, from source tables through every intermediate step to the targets.
 - **Columns:** each box lists only the columns in the lineage, with an arrow for every hop a value takes.
 
-On both pages a source table sits just left of the first step that reads it, and boxes are stacked next to what they feed, so arrows run short and mostly straight.
+On both pages a source table sits just left of the first step that reads it, and each box lines up with what it connects to, so most arrows run straight. Arrows are drawn behind the boxes and never through one:
+
+- a long arrow passes other columns of boxes in a lane kept free for it
+- every bend sits in the gap between two columns, on a track of its own, so wires don't run on top of each other
+
+A table the script writes (a target, a temp table, a view) lists its columns in the order they're written, and the boxes feeding it follow that order. Moving a box in draw.io keeps its rows stacked and its arrows attached.
+
+### Driving and joined tables
+
+A **solid** arrow comes from a step's driving table, the one that decides which rows the step has. A **dashed** grey arrow comes from a table that's joined in for more columns, or that only filters:
+
+| Query | Solid (driving) | Dashed (joined in / filter) |
+|---|---|---|
+| `FROM a LEFT JOIN b`, `FROM a JOIN b` | `a` | `b` |
+| `FROM a RIGHT JOIN b` | `b` | `a` |
+| `FROM a FULL JOIN b` | `a` and `b` | |
+| `FROM a CROSS JOIN b`, `FROM a, UNNEST(…)` | `a` | `b`, the `UNNEST` |
+| `WHERE x IN (SELECT … FROM f)` | | `f` |
+| `… UNION ALL …` | each branch's `FROM` | |
+
+The rule carries through steps that only copy: in `WITH c AS (SELECT * FROM b) … LEFT JOIN c`, the arrow from `b` is dashed. Where a solid and a dashed arrow meet, the solid one is drawn on top.
 
 ### Intermediate steps
 
@@ -68,9 +88,9 @@ flowchart LR
     c_region --> e_region
     p_gross -- "SUM(gross)" --> r_revenue
     p_cid --> r_cid
-    e_cid --> r_cid
-    e_name --> r_name
-    e_region --> r_region
+    e_cid -.-> r_cid
+    e_name -.-> r_name
+    e_region -.-> r_region
     classDef source fill:#dae8fc,stroke:#6c8ebf,color:#000
     classDef temp fill:#f5f5f5,stroke:#666666,stroke-dasharray:5 5,color:#000
     classDef cte fill:#fff2cc,stroke:#d6b656,color:#000
@@ -81,7 +101,7 @@ flowchart LR
     class revenue target
 ```
 
-Hovering `gross` in the temp table shows `gross = o.amount * 1.2`, `WHERE: o.status = 'PAID' AND …`. Hovering `revenue` shows that, plus the `SUM`, the JOIN and the GROUP BY that follow.
+`FROM paid_orders p JOIN eu_customers c` makes `paid_orders` the driving table (solid arrows), and `eu_customers` is joined in (dashed). Hovering `gross` in the temp table shows `gross = o.amount * 1.2`, `WHERE: o.status = 'PAID' AND …`. Hovering `revenue` shows that, plus the `SUM`, the JOIN and the GROUP BY that follow.
 
 ### Size
 
@@ -89,10 +109,10 @@ The Tables page stays small. The Columns page grows with the number of columns. 
 
 | What you export | File | Shapes | Arrows |
 |---|---|---|---|
-| Whole script, both pages | ~141 KB | 4,090 | 3,035 |
-| `--table out0` | ~31 KB | 824 | 607 |
-| `--table out0 --columns c0,c1` | ~2 KB | 28 | 13 |
-| `--level table` | ~2 KB | 44 | 35 |
+| Whole script, both pages | ~179 KB | 4,092 | 3,035 |
+| `--table out0` | ~39 KB | 828 | 607 |
+| `--table out0 --columns c0,c1` | ~3 KB | 31 | 13 |
+| `--level table` | ~3 KB | 46 | 35 |
 
 draw.io opens all of these, but past a few hundred columns the Columns page is too dense to read. So:
 

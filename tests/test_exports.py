@@ -1,5 +1,6 @@
 """draw.io and OpenLineage exports."""
 import xml.etree.ElementTree as ET
+from itertools import pairwise
 from types import SimpleNamespace
 
 from bqlineage import DictSchemaProvider, analyze, cli
@@ -34,15 +35,43 @@ def legend(page) -> set:
     return {label for label, c in _cells(page).values() if (c.get("style") or "").startswith(LEGEND)}
 
 
-def arrows(page) -> set:
-    """(source, target) labels; a row is box.column"""
+def _name(cells, cid) -> str:
+    label, c = cells[cid]
+    return label if c.get("parent") == "1" else f"{cells[c.get('parent')][0]}.{label}"
+
+
+def arrows(page, dashed=None) -> set:
+    """(source, target) labels; a row is box.column. dashed: only the dashed (True) or solid (False) ones"""
+    cells = _cells(page)
+    return {(_name(cells, c.get("source")), _name(cells, c.get("target"))) for _, c in cells.values()
+            if c.get("source") and dashed in (None, "dashed=1" in c.get("style"))}  # the legend's samples have none
+
+
+def _routes(page) -> tuple[dict, list]:
+    """(source, target) -> the arrow's points (where it leaves, its bends, where it arrives); every box as
+    (x, y, w, h)."""
     cells = _cells(page)
 
-    def name(cid):
-        label, c = cells[cid]
-        return label if c.get("parent") == "1" else f"{cells[c.get('parent')][0]}.{label}"
+    def geo(cid):  # on the page: a row is placed inside its box
+        c = cells[cid][1]
+        g = c.find("mxGeometry")
+        x, y, w, h = (float(g.get(k, 0)) for k in ("x", "y", "width", "height"))
+        if c.get("parent") != "1":
+            px, py, _, _ = geo(c.get("parent"))
+            x, y = x + px, y + py
+        return x, y, w, h
 
-    return {(name(c.get("source")), name(c.get("target"))) for _, c in cells.values() if c.get("edge")}
+    rects = [geo(i) for i, (_, c) in cells.items() if c.get("vertex") and c.get("parent") == "1" and geo(i)[1] >= 0]
+    routes = {}
+    for _, c in cells.values():
+        if c.get("source"):
+            st = dict(kv.split("=", 1) for kv in c.get("style").split(";") if "=" in kv)
+            (sx, sy, sw, sh), (tx, ty, _, th) = geo(c.get("source")), geo(c.get("target"))
+            routes[_name(cells, c.get("source")), _name(cells, c.get("target"))] = [
+                (sx + sw, sy + sh * float(st["exitY"])),
+                *((float(p.get("x")), float(p.get("y"))) for p in c.iter("mxPoint")),
+                (tx, ty + th * float(st["entryY"]))]
+    return routes, rects
 
 
 def test_drawio_export_of_the_example(tmp_path, capsys):
@@ -70,7 +99,12 @@ def test_drawio_export_of_the_example(tmp_path, capsys):
                                        ("_SESSION.paid_orders", "shop.dw.customer_revenue"),
                                        ("shop.crm.customers", "eu_customers"),
                                        ("eu_customers", "shop.dw.customer_revenue")}
-    assert legend(pages["Tables"]) == {"source table", "temp table", "CTE", "target"}
+    assert legend(pages["Tables"]) == {"source table", "temp table", "CTE", "target",
+                                       "driving table (FROM)", "joined in / filter"}
+    # FROM paid_orders p JOIN eu_customers c: paid_orders decides the rows, eu_customers adds columns
+    assert arrows(pages["Tables"], dashed=True) == {("eu_customers", "shop.dw.customer_revenue")}
+    assert ("eu_customers.name", "shop.dw.customer_revenue.customer_name") in arrows(pages["Columns"], dashed=True)
+    assert ("_SESSION.paid_orders.gross", "shop.dw.customer_revenue.revenue") in arrows(pages["Columns"], dashed=False)
     assert {"amount", "gross", "revenue", "loaded_at"} <= labels(pages["Columns"])
     revenue = next(u for u in pages["Columns"].iter("UserObject") if u.get("label") == "revenue")
     assert "SUM(p.gross)" in revenue.get("tooltip") and "o.status = 'PAID'" in revenue.get("tooltip")
@@ -122,7 +156,9 @@ def test_drawio_draws_every_intermediate_step_in_its_own_style():
         ("p.d.blocked", "_SESSION.t"),  # only filters (WHERE ... IN): drawn to the step that reads it
         ("_SESSION.t", "u"), ("p.d.b", "u"),  # through `copy`, which only copies
         ("u", "(subquery) s"), ("(subquery) s", "p.d.out")}
-    assert legend(pages["Tables"]) == {"source table", "view", "temp table", "CTE", "subquery", "target"}
+    assert legend(pages["Tables"]) == {"source table", "view", "temp table", "CTE", "subquery", "target",
+                                       "driving table (FROM)", "joined in / filter"}
+    assert arrows(pages["Tables"], dashed=True) == {("p.d.blocked", "_SESSION.t")}  # both UNION branches drive u
     assert arrows(pages["Columns"]) == {
         ("p.d.a.id", "p.d.a_v.id"), ("p.d.a.x", "p.d.a_v.x"),
         ("p.d.a_v.id", "_SESSION.t.id"), ("p.d.a_v.x", "_SESSION.t.x"),
@@ -155,6 +191,92 @@ def test_drawio_steps_follow_the_table_and_columns_filters():
     one = _pages(to_drawio(r, "both", True, "out2", ["y"]))
     assert arrows(one["Tables"]) == {("p.d.b", "base"), ("base", "p.d.out2")}
     assert arrows(one["Columns"]) == {("p.d.b.y", "base.y"), ("base.y", "p.d.out2.y")}
+
+
+def test_drawio_solid_arrows_come_from_the_driving_table():
+    from bqlineage.drawio import to_drawio
+
+    schema = DictSchemaProvider({**STEPS_SCHEMA, **{f"p.d.out{i}": {"id": "INT64", "y": "INT64"} for i in (2, 3, 4)}})
+    r = analyze("""
+INSERT INTO `p.d.out` (id, v) SELECT a.id, b.y FROM `p.d.a` a LEFT JOIN `p.d.b` b ON b.id = a.id;
+INSERT INTO `p.d.out2` (id, y) SELECT b.id, a.x FROM `p.d.a` a RIGHT JOIN `p.d.b` b ON b.id = a.id;
+INSERT INTO `p.d.out3` (id, y) SELECT a.id, b.y FROM `p.d.a` a FULL JOIN `p.d.b` b USING (id)
+                               JOIN `p.d.blocked` k USING (id);
+INSERT INTO `p.d.out4` (id, y) WITH c AS (SELECT * FROM `p.d.b`) SELECT a.id, c.y FROM `p.d.a` a LEFT JOIN c USING (id)
+""", schema)
+    assert r.ok, r.issues
+    pages = _pages(to_drawio(r))
+    assert arrows(pages["Tables"], dashed=False) == {
+        ("p.d.a", "p.d.out"),  # FROM a LEFT JOIN b: a
+        ("p.d.b", "p.d.out2"),  # FROM a RIGHT JOIN b: b
+        ("p.d.a", "p.d.out3"), ("p.d.b", "p.d.out3"),  # FULL JOIN: both
+        ("p.d.a", "p.d.out4")}
+    assert arrows(pages["Tables"], dashed=True) == {
+        ("p.d.b", "p.d.out"), ("p.d.a", "p.d.out2"),
+        ("p.d.blocked", "p.d.out3"),  # an INNER JOIN that only filters
+        ("p.d.b", "p.d.out4")}  # through c, which only copies: joined in all the same
+    assert arrows(pages["Columns"], dashed=True) == {
+        ("p.d.b.y", "p.d.out.v"), ("p.d.a.x", "p.d.out2.y"), ("p.d.b.y", "p.d.out4.y")}
+
+
+STRESS_SQL = """
+CREATE TEMP TABLE base AS
+SELECT order_id, customer_id, product_id, amount, order_ts FROM `p.d.orders` WHERE status = 'PAID';
+INSERT INTO `p.d.facts` (order_id, customer_name, segment, product_name, amount, refunded, net)
+WITH cust AS (SELECT c.customer_id, c.name, s.segment FROM `p.d.customers` c
+              LEFT JOIN `p.d.segments` s ON s.customer_id = c.customer_id),
+     prod AS (SELECT product_id, name AS product_name FROM `p.d.products` WHERE live),
+     ref AS (SELECT order_id, SUM(refund) AS refunded FROM `p.d.refunds` GROUP BY order_id),
+     joined AS (SELECT b.order_id, cu.name AS customer_name, cu.segment, pr.product_name, b.amount,
+                       IFNULL(r.refunded, 0) AS refunded
+                FROM base b LEFT JOIN cust cu USING (customer_id) LEFT JOIN prod pr USING (product_id)
+                LEFT JOIN ref r USING (order_id)
+                WHERE b.customer_id NOT IN (SELECT customer_id FROM `p.d.blocked`))
+SELECT order_id, customer_name, segment, product_name, amount, refunded, amount - refunded FROM joined;
+INSERT INTO `p.d.daily` (day, net)
+SELECT DATE(b.order_ts), SUM(f.net) FROM `p.d.facts` f JOIN base b USING (order_id) GROUP BY 1
+"""
+STRESS_SCHEMA = {
+    "p.d.orders": {"order_id": "INT64", "customer_id": "INT64", "product_id": "INT64", "amount": "NUMERIC",
+                   "order_ts": "TIMESTAMP", "status": "STRING"},
+    "p.d.customers": {"customer_id": "INT64", "name": "STRING"},
+    "p.d.segments": {"customer_id": "INT64", "segment": "STRING"},
+    "p.d.products": {"product_id": "INT64", "name": "STRING", "live": "BOOL"},
+    "p.d.refunds": {"order_id": "INT64", "refund": "NUMERIC"},
+    "p.d.blocked": {"customer_id": "INT64"},
+    "p.d.facts": {"order_id": "INT64", "customer_name": "STRING", "segment": "STRING", "product_name": "STRING",
+                  "amount": "NUMERIC", "refunded": "NUMERIC", "net": "NUMERIC"},
+    "p.d.daily": {"day": "DATE", "net": "NUMERIC"},
+}
+
+
+def test_drawio_arrows_run_between_boxes_never_through_them():
+    from bqlineage.drawio import to_drawio
+
+    stress = analyze(STRESS_SQL, DictSchemaProvider(STRESS_SCHEMA))
+    assert stress.ok, stress.issues
+    steps = analyze(STEPS_SQL, DictSchemaProvider(STEPS_SCHEMA))
+    for xml in (to_drawio(stress), to_drawio(stress, resolve=False), to_drawio(steps), to_drawio(steps, resolve=False)):
+        for name, page in _pages(xml).items():
+            routes, rects = _routes(page)
+            assert routes and len(rects) > 3
+            for pts in routes.values():
+                for (x1, y1), (x2, y2) in pairwise(pts):
+                    assert abs(x1 - x2) < .01 or abs(y1 - y2) < .01, (name, pts)  # straight runs, square bends
+                    for bx, by, bw, bh in rects:
+                        if abs(y1 - y2) < .01:
+                            assert not (by < y1 < by + bh and max(x1, x2) > bx and min(x1, x2) < bx + bw), (name, pts)
+                        else:
+                            assert not (bx < x1 < bx + bw and max(y1, y2) > by and min(y1, y2) < by + bh), (name, pts)
+            cells = [c for c in page.iter() if c.tag == "mxCell" and (c.get("source") or c.get("vertex"))]
+            kinds = ["box" if c.get("vertex") else "dashed" if "dashed=1" in c.get("style") else "solid" for c in cells]
+            # arrows behind the boxes, the dashed ones behind the solid ones
+            assert kinds == sorted(kinds, key=["dashed", "solid", "box"].index)
+            # rows stack top to bottom: draw.io re-stacks them whenever a box moves
+            assert all("horizontalStack=0" in c.get("style") for c in cells if "swimlane" in c.get("style", ""))
+    # base.order_ts -> daily.day passes two columns of boxes in lanes, and bends once
+    routes = _routes(_pages(to_drawio(stress))["Columns"])[0]
+    assert len(routes["_SESSION.base.order_ts", "p.d.daily.day"]) == 4
 
 
 # ---- OpenLineage -----------------------------------------------------------------------------------
