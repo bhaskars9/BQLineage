@@ -16,7 +16,9 @@ On both pages a source table sits just left of the first step that reads it, and
 - a long arrow passes other columns of boxes in a lane kept free for it
 - every bend sits in the gap between two columns, on a track of its own, so wires don't run on top of each other
 
-A table the script writes (a target, a temp table, a view) lists its columns in the order they're written, and the boxes feeding it follow that order. Moving a box in draw.io keeps its rows stacked and its arrows attached.
+A table the script writes (a target, a temp table, a view) lists its columns in the order they're written, and the boxes feeding it follow that order.
+
+The diagram stays editable. Arrows are draw.io's own connectors, routed live, so dragging a table re-routes its arrows. An arrow with one bend, which is almost every arrow, keeps turning in its own track. Only a long arrow that needs two bends to get around boxes has fixed bend points. A table dragged onto another stays a table of its own, and its rows stay stacked.
 
 ### Driving and joined tables
 
@@ -109,10 +111,10 @@ The Tables page stays small. The Columns page grows with the number of columns. 
 
 | What you export | File | Shapes | Arrows |
 |---|---|---|---|
-| Whole script, both pages | ~179 KB | 4,092 | 3,035 |
-| `--table out0` | ~39 KB | 828 | 607 |
+| Whole script, both pages | ~159 KB | 4,092 | 3,035 |
+| `--table out0` | ~35 KB | 828 | 607 |
 | `--table out0 --columns c0,c1` | ~3 KB | 31 | 13 |
-| `--level table` | ~3 KB | 46 | 35 |
+| `--level table` | ~2 KB | 46 | 35 |
 
 draw.io opens all of these, but past a few hundred columns the Columns page is too dense to read. So:
 

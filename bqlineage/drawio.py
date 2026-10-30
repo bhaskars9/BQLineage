@@ -41,9 +41,10 @@ LINES = {  # drives the rows? -> (style, legend label)
 }
 TABLE = "rounded=1;whiteSpace=wrap;fontStyle=1;"
 LEGEND = "rounded=1;whiteSpace=wrap;fontSize=11;"
-# horizontalStack=0: draw.io re-stacks the rows whenever a box moves, and stacks sideways by default
+# horizontalStack=0: draw.io re-stacks the rows whenever a box moves, and stacks sideways by default.
+# dropTarget=0: a box dragged onto another stays a box of its own, not a row of it
 CONTAINER = ("swimlane;startSize=30;fontStyle=1;childLayout=stackLayout;horizontal=1;horizontalStack=0;"
-             "resizeParent=1;resizeParentMax=0;resizeLast=0;marginBottom=0;collapsible=1;")
+             "resizeParent=1;resizeParentMax=0;resizeLast=0;marginBottom=0;collapsible=1;dropTarget=0;")
 FIELD = "text;align=left;verticalAlign=middle;spacingLeft=8;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;"
 EDGE = "edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;jumpStyle=arc;jumpSize=6;"
 _NOT_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")  # control characters XML forbids (pasted SQL can carry them)
@@ -210,11 +211,12 @@ def _layout(level: dict, size: dict, wires: list) -> tuple[dict, list]:
     """Place boxes in columns by level and route the wires between them so none crosses a box.
     size: box -> (width, height). wires: (src, y in src, dst, y in dst, or None to share dst's left side out among
     the wires into it, line style). A wire that skips columns passes each through a lane: a placeholder stacked
-    with that column's boxes, shared by the wires from the same port in the same style (so does a bend). Boxes then move up or down to line up with what they
-    connect to, keeping their order, and runs of lanes level out where there's room. Every bend sits in the gap
-    after a column, on a track of its own.
-    Returns box -> (x, y), and per wire (y in dst, bend points), or None for a wire against the flow (a cycle),
-    which draw.io routes itself."""
+    with that column's boxes, shared by the wires from the same port in the same style (so does a bend). Boxes
+    then move up or down to line up with what they connect to, keeping their order, and runs of lanes level out
+    where there's room. Every bend sits in the gap after a column, on a track of its own.
+    Returns box -> (x, y), and per wire (y in dst, bend points, jetty sizes), or None for a wire against the flow
+    (a cycle), which draw.io routes itself. A wire with one bend (most) gets no points, only the jetty sizes
+    that make draw.io turn it on its track, so it follows when a box is moved."""
     lvl, h = dict(level), {b: hb for b, (_, hb) in size.items()}
     chains, into = {}, {}  # wire -> items it passes; box -> wires sharing its left side
     for i, (s, so, t, to, style) in enumerate(wires):
@@ -323,12 +325,15 @@ def _layout(level: dict, size: dict, wires: list) -> tuple[dict, list]:
         if i not in chains:
             routes.append(None)
             continue
-        points = []
+        points, jetty = [], None
         for a, ao, b, bo, style in hops(i):
             if y[a] + ao != y[b] + bo:
                 tx = track[lvl[a], (a, y[a] + ao, style)]
                 points += [(tx, y[a] + ao), (tx, y[b] + bo)]
-        routes.append((entry[i], points))
+        if len(points) == 2:  # one bend: no fixed points, so the arrow follows when a box moves. draw.io turns at
+            s, t = wires[i][0], wires[i][2]  # (source right + source jetty + target left - target jetty) / 2
+            jetty, points = (points[0][0] - x_of[lvl[s]] - size[s][0], x_of[lvl[t]] - points[0][0]), []
+        routes.append((entry[i], points, jetty))
     return {b: (x_of[lvl[b]], y[b]) for b in size}, routes
 
 
@@ -393,13 +398,14 @@ class _Cells:
 
     def edge(self, source, target, driving, route, exit_y=0.5):
         """An arrow, drawn behind every box (cells earlier in the file are drawn first), a dashed one behind the
-        solid ones, so where they meet the solid one shows. route: (y in target,
-        bend points) from _layout, with exit_y / the y in target as fractions of the boxes' heights; None:
-        draw.io's own routing."""
+        solid ones, so where they meet the solid one shows. route: (y in target, bend points, jetty sizes) from
+        _layout, with exit_y / the y in target as fractions of the boxes' heights; None: draw.io's own routing."""
         self.n += 1
         style = EDGE + LINES[driving][0]
         if route:
-            style += f"exitX=1;exitY={exit_y:.4g};entryX=0;entryY={route[0]:.4g};"
+            style += f"exitX=1;exitY={exit_y:.6g};entryX=0;entryY={route[0]:.6g};"
+            if route[2]:
+                style += f"sourceJettySize={route[2][0]};targetJettySize={route[2][1]};"
         cell = ET.Element("mxCell", id=f"c{self.n}", style=style, edge="1", parent="1", source=source, target=target)
         geo = ET.SubElement(cell, "mxGeometry", {"relative": "1", "as": "geometry"})
         if route and route[1]:
@@ -473,7 +479,7 @@ def _tables_page(result, resolve, table):
         style = TABLE + KINDS[_kind(result, n)][0]
         ids[n] = cells.vertex(_label(n), style, x, y, size[n][0], size[n][1], tooltip=_about(g, n))
     for (s, _, t, _, d), route in zip(wires, routes):
-        cells.edge(ids[s], ids[t], d, route and (route[0] / size[t][1], route[1]))
+        cells.edge(ids[s], ids[t], d, route and (route[0] / size[t][1], *route[1:]))
     return cells.root
 
 
@@ -527,7 +533,7 @@ def _columns_page(result, resolve, table, columns):
         for i, c in enumerate(rows[b]):
             ids[(b, c)] = cells.vertex(c, FIELD, 0, HEAD + ROW * i, w, ROW, parent=box, tooltip=fields[b][c])
     for ((x, n), d), route in zip(links, routes):
-        cells.edge(ids[x], ids[n], d, route and (0.5, route[1]))
+        cells.edge(ids[x], ids[n], d, route and (0.5, *route[1:]))
     return cells.root
 
 

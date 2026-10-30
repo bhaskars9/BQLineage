@@ -49,7 +49,8 @@ def arrows(page, dashed=None) -> set:
 
 def _routes(page) -> tuple[dict, list]:
     """(source, target) -> the arrow's points (where it leaves, its bends, where it arrives); every box as
-    (x, y, w, h)."""
+    (x, y, w, h). An arrow without points is draw.io's own orthogonal route: it turns at (source right + source
+    jetty + target left - target jetty) / 2, which is what the draw.io app draws (checked against its SVG export)."""
     cells = _cells(page)
 
     def geo(cid):  # on the page: a row is placed inside its box
@@ -67,10 +68,13 @@ def _routes(page) -> tuple[dict, list]:
         if c.get("source"):
             st = dict(kv.split("=", 1) for kv in c.get("style").split(";") if "=" in kv)
             (sx, sy, sw, sh), (tx, ty, _, th) = geo(c.get("source")), geo(c.get("target"))
-            routes[_name(cells, c.get("source")), _name(cells, c.get("target"))] = [
-                (sx + sw, sy + sh * float(st["exitY"])),
-                *((float(p.get("x")), float(p.get("y"))) for p in c.iter("mxPoint")),
-                (tx, ty + th * float(st["entryY"]))]
+            start, end = (sx + sw, sy + sh * float(st["exitY"])), (tx, ty + th * float(st["entryY"]))
+            bends = [(float(p.get("x")), float(p.get("y"))) for p in c.iter("mxPoint")]
+            if "sourceJettySize" in st:
+                assert not bends
+                turn = (start[0] + float(st["sourceJettySize"]) + end[0] - float(st["targetJettySize"])) / 2
+                bends = [(turn, start[1]), (turn, end[1])]
+            routes[_name(cells, c.get("source")), _name(cells, c.get("target"))] = [start, *bends, end]
     return routes, rects
 
 
@@ -275,8 +279,10 @@ def test_drawio_arrows_run_between_boxes_never_through_them():
             # rows stack top to bottom: draw.io re-stacks them whenever a box moves
             assert all("horizontalStack=0" in c.get("style") for c in cells if "swimlane" in c.get("style", ""))
     # base.order_ts -> daily.day passes two columns of boxes in lanes, and bends once
-    routes = _routes(_pages(to_drawio(stress))["Columns"])[0]
-    assert len(routes["_SESSION.base.order_ts", "p.d.daily.day"]) == 4
+    pages = _pages(to_drawio(stress))
+    assert len(_routes(pages["Columns"])[0]["_SESSION.base.order_ts", "p.d.daily.day"]) == 4
+    # no arrow has fixed points: draw.io routes each one itself, so it follows a box that's moved
+    assert not [p for page in pages.values() for p in page.iter("mxPoint") if p.get("as") is None]
 
 
 # ---- OpenLineage -----------------------------------------------------------------------------------
